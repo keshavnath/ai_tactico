@@ -80,24 +80,48 @@ class TacticalAgent:
         """Action step: execute a tool based on reasoning."""
         last_thought = state.thoughts[-1] if state.thoughts else ""
         
-        # Parse tool call from LLM thought
+        # Parse tool call from LLM thought - only get FIRST action
         action_match = re.search(r"Action:\s*(\w+)", last_thought, re.IGNORECASE)
-        input_match = re.search(
-            r"Action Input:\s*({.*})",
-            last_thought,
-            re.IGNORECASE | re.DOTALL
-        )
         
         if not action_match:
             print("[ACT] ERROR: No 'Action:' found in response")
             print("[ACT] Expected format: Action: [tool_name]")
             return state
         
+        # Find Action Input after the found Action
+        action_pos = action_match.start()
+        remaining_text = last_thought[action_pos:]
+        input_match = re.search(
+            r"Action Input:\s*(\{)",
+            remaining_text,
+            re.IGNORECASE
+        )
+        
         if not input_match:
             print("[ACT] ERROR: No 'Action Input:' JSON found in response")
             print("[ACT] Expected format: Action Input: {} or {'period': 1}")
             return state
         
+        # Extract JSON by counting braces - find complete JSON object
+        json_start = action_pos + input_match.start(1)  # Position of first {
+        brace_count = 0
+        json_end = None
+        
+        for i in range(json_start, len(last_thought)):
+            if last_thought[i] == '{':
+                brace_count += 1
+            elif last_thought[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    json_end = i + 1
+                    break
+        
+        if json_end is None:
+            print("[ACT] ERROR: Incomplete JSON - mismatched braces")
+            print("[ACT] Got: " + last_thought[json_start:json_start+100])
+            return state
+        
+        json_str = last_thought[json_start:json_end]
         tool_name = action_match.group(1)
         
         # Validate tool exists
@@ -109,11 +133,11 @@ class TacticalAgent:
         
         # Parse JSON input
         try:
-            tool_input = json.loads(input_match.group(1))
+            tool_input = json.loads(json_str)
         except json.JSONDecodeError as e:
             print(f"[ACT] ERROR: Invalid JSON in Action Input")
             print(f"[ACT] Parse error: {str(e)}")
-            print(f"[ACT] Got: {input_match.group(1)[:100]}")
+            print(f"[ACT] Got: {json_str[:100]}")
             return state
         
         # Auto-inject period default if missing
