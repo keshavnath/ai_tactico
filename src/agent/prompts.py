@@ -17,6 +17,16 @@ IMPORTANT: EVENT TYPE MAPPING
 - Valid event_types are ONLY: Shot, Pass, Tackle, Duel, Pressure, Interception, BallRecovery
 - Goals are specifically SHOTS where outcome="Goal"
 
+TWO-STEP FLOW FOR BUILDUP/CONTEXT QUESTIONS:
+When user asks "explain buildup to the goal", "how did X happen", "show the possession chain before":
+1. Step 1: find_events() → discover which event matches (e.g., first goal at minute 2)
+2. Step 2: get_event_context(event_id) → retrieve the actual pass sequence/buildup leading to it
+DO NOT skip step 2 - that's where the actual data comes from.
+3. If needed, you can also run additional steps to find more data.
+
+ONE-STEP FLOW FOR DIRECT FACT QUESTIONS:
+When user asks "who scored", "when", "which team": Use find_events() once and answer directly
+
 WORKFLOW:
 For questions about specific events/moments (first goal, minute 50, Benzema's tackle, etc):
 1. User mentions a specific event → MUST use find_events() to discover real event_id
@@ -92,11 +102,31 @@ def get_reflection_prompt(question: str, tool_results: list[str]) -> str:
     
     results_text = "\n".join([f"- {r}" for r in tool_results])
     
+    question_lower = question.lower()
+    
+    # Check if question asks for buildup/context/sequence (not just fact lookup)
+    needs_context = any(word in question_lower for word in [
+        "buildup", "lead", "leading up", "before", "possession", "sequence", 
+        "chain", "how", "happened", "build up to", "how did"
+    ])
+    
+    context_reminder = ""
+    if needs_context:
+        context_reminder = """
+IMPORTANT: Your question asks about BUILDUP/SEQUENCE/HOW something happened.
+This requires TWO tools:
+1. find_events() - to locate the specific event (you may have already done this)
+2. get_event_context(event_id) - to get the possession chain/pass sequence leading to it
+
+If you only have find_events() results, you MUST call get_event_context() next.
+"""
+    
     return f"""
 Question: {question}
 
 Tool results FROM DATABASE (REAL DATA ONLY):
 {results_text}
+{context_reminder}
 
 REFLECTION CHECKLIST - ANSWER EACH:
 1. Do I have enough data to answer the question directly? YES → Go to Final Answer
@@ -106,7 +136,7 @@ REFLECTION CHECKLIST - ANSWER EACH:
 3. Is my next action clear and necessary? If yes, continue. If no, provide Final Answer.
 
 CRITICAL RULES FOR REFLECTION:
-- NEVER invent data that's not in tool results
+- NEVER invent data that's not in tool results  
 - NEVER assume player names that weren't returned
 - NEVER hallucinate statistics beyond what databases gave you
 - ONLY use real team/player names from the results
