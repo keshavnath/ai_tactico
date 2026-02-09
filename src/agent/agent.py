@@ -58,11 +58,13 @@ class TacticalAgent:
             available_tools,
         )
         
+        print(f"\n[THINK] Iteration {len(state.thoughts) + 1}")
         thought = self.llm.generate(
             prompt,
             system=FOOTBALL_ANALYST_SYSTEM_PROMPT,
         )
         
+        print(f"{thought}")
         state.thoughts.append(thought)
         return state
     
@@ -79,28 +81,35 @@ class TacticalAgent:
         )
         
         if not action_match or not input_match:
-            # No valid tool call, mark for reflection
+            print("[ACT] No tool call found in thought")
             return state
         
         tool_name = action_match.group(1)
         try:
             tool_input = json.loads(input_match.group(1))
         except json.JSONDecodeError:
+            print(f"[ACT] Failed to parse tool input")
             return state
         
-        # Auto-inject period default if missing
         if tool_name == "get_pressing_intensity" and "period" not in tool_input:
             tool_input["period"] = 1
         
-        # Execute tool - pass db client as first argument
+        print(f"[ACT] Calling {tool_name}({tool_input})")
         tool_func = getattr(tools, tool_name, None)
         if not tool_func:
             result = ToolResult(success=False, error=f"Unknown tool: {tool_name}")
+            print(f"[ACT] ERROR: Unknown tool")
         else:
             try:
                 result = tool_func(self.db, **tool_input)
+                if result.success:
+                    data_preview = str(result.data)[:100]
+                    print(f"[ACT] Success: {data_preview}")
+                else:
+                    print(f"[ACT] Tool error: {result.error}")
             except TypeError as e:
                 result = ToolResult(success=False, error=f"Tool call error: {str(e)}")
+                print(f"[ACT] Execution error: {e}")
         
         state.tool_calls.append((tool_name, tool_input))
         state.tool_results.append(result)
@@ -120,6 +129,8 @@ class TacticalAgent:
             else:
                 result_summaries.append(f"Tool error: {result.error}")
         
+        print(f"\n[REFLECT] Evaluating {len(result_summaries)} result(s)")
+        
         reflection_prompt = get_reflection_prompt(
             state.user_question,
             result_summaries,
@@ -130,18 +141,21 @@ class TacticalAgent:
             system=FOOTBALL_ANALYST_SYSTEM_PROMPT,
         )
         
+        print(f"{reflection}")
+        
         state.thoughts.append(reflection)
         
         # Check if we should finalize answer
         if "Final Answer:" in reflection:
             state.final_answer = reflection.split("Final Answer:")[-1].strip()
+            print(f"\n[FINAL] Answer ready")
         
         return state
     
     def _answer_node(self, state: AgentState) -> AgentState:
         """Final answer synthesis."""
         if not state.final_answer:
-            # Generate final answer if not already set
+            print(f"\n[ANSWER] Synthesizing final response...")
             synthesis_prompt = get_react_prompt(
                 state.user_question,
                 tools.list_available_tools(),
@@ -160,6 +174,7 @@ class TacticalAgent:
             )
             
             state.final_answer = final_analysis
+            print(f"{final_analysis}")
         
         return state
     
@@ -183,8 +198,17 @@ class TacticalAgent:
         Args:
             question: The tactical question to analyze
         """
+        print(f"\n{'='*60}")
+        print(f"QUESTION: {question}")
+        print(f"{'='*60}")
+        
         initial_state = AgentState(user_question=question)
         final_state: AgentState = self.graph.invoke(initial_state)
+        
+        print(f"\n{'='*60}")
+        print(f"Analysis complete in {len(final_state.thoughts)} iterations")
+        print(f"{'='*60}\n")
+        
         return final_state.final_answer or "Unable to generate analysis"
 
 
