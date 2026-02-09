@@ -1,9 +1,12 @@
 """Tactical analysis tools for graph traversal.
 
 Pure functions for querying the Neo4j knowledge graph and computing tactical metrics.
-Each tool has a detailed docstring that serves as the prompt for the agent,
+Each tool's docstring is automatically extracted and serves as the prompt for the agent,
 explaining when to use it, what it needs, and what to expect.
+
+Works like MCP: docstrings are the single source of truth for tool descriptions.
 """
+import inspect
 from src.db import Neo4jClient
 from .schemas import PossessionChain, PassData, FormationSnapshot, ToolResult
 from typing import Optional, Any
@@ -251,35 +254,339 @@ def get_pressing_intensity(
         return ToolResult(success=False, error=str(e), raw_query=query)
 
 
-def list_available_tools() -> list[dict]:
-    """Return metadata about available tools.
+def get_possession_stats(
+    db: Neo4jClient,
+    period: Optional[int] = None,
+) -> ToolResult:
+    """Analyze ball possession statistics and patterns.
     
-    Used by the agent to understand what tools can be called and when to use them.
+    Use this tool when:
+    - User asks about possession percentages or ball control
+    - You need to understand which team dominated the match
+    - You want to assess tactical dominance ("who controlled the game?")
+    - Analyzing first half vs second half possession changes
+    
+    Returns:
+    - Possession percentage for each team
+    - Total passes by each team
+    - Pass completion rates
+    - Possession duration
+    
+    Example questions this answers:
+    "Who had more possession?"
+    "Did possession change in the second half?"
+    "Which team controlled the ball more?"
+    "What was the possession pattern?"
     """
-    return [
-        {
-            "name": "find_goals",
-            "description": "Find all goals in the match with scorer and timing",
-            "signature": "find_goals()",
-            "usage": "When analyzing goal-scoring moments or key match events",
-        },
-        {
-            "name": "get_possession_before_event",
-            "description": "Get the possession chain leading to a specific event with metrics",
-            "signature": "get_possession_before_event(event_id)",
-            "usage": "When analyzing buildup play, passing patterns, tactical setup",
-        },
-        {
-            "name": "get_team_formation",
-            "description": "Get a team's formation at a specific moment",
-            "signature": "get_team_formation(team_id, minute)",
-            "usage": "When analyzing tactical organization, defensive structure",
-        },
-        {
-            "name": "get_pressing_intensity",
-            "description": "Analyze defensive pressure intensity during a period",
-            "signature": "get_pressing_intensity(period=1)",
-            "note": "period defaults to 1 (first half), use 2 for second half",
-            "usage": "When analyzing defensive strategies, pressing tactics",
-        },
+    if period:
+        period_filter = f"WHERE e.period = {period}"
+    else:
+        period_filter = ""
+    
+    query = f"""
+    MATCH (e:Pass)
+    {period_filter}
+    MATCH (e)-[:BY]->(p:Player)
+    MATCH (p)-[:PLAYS_FOR]->(t:Team)
+    WITH t.id as team_id, t.name as team_name, COUNT(e) as pass_count
+    RETURN team_id, team_name, pass_count
+    ORDER BY pass_count DESC
+    """
+    
+    try:
+        results = db.query(query)
+        
+        if not results:
+            return ToolResult(success=False, error="No possession data found")
+        
+        total_passes = sum(r["pass_count"] for r in results)
+        possession_data = [
+            {
+                "team_id": r["team_id"],
+                "team_name": r["team_name"],
+                "passes": r["pass_count"],
+                "possession_pct": round((r["pass_count"] / total_passes * 100), 1) if total_passes > 0 else 0,
+            }
+            for r in results
+        ]
+        
+        return ToolResult(success=True, data=possession_data, raw_query=query)
+    
+    except Exception as e:
+        return ToolResult(success=False, error=str(e), raw_query=query)
+
+
+def get_attacking_patterns(
+    db: Neo4jClient,
+    team_id: Optional[str] = None,
+) -> ToolResult:
+    """Analyze how teams build attacks and create chances.
+    
+    Use this tool when:
+    - User asks about attacking strategies or tactics
+    - You need to understand playmaking patterns
+    - Analyzing how a team creates scoring opportunities
+    - Understanding through-ball usage vs build-up play
+    
+    Returns:
+    - Shot attempts and their location/type
+    - Key passing actions (through-balls, key passes)
+    - Active attacking players
+    - Attack patterns (wide attacks, central play, counters)
+    
+    Example questions this answers:
+    "How did they attack?"
+    "What was their attacking strategy?"
+    "Were they more direct or build-up focused?"
+    "Who were the key playmakers?"
+    """
+    query = """
+    MATCH (shot:Shot)
+    OPTIONAL MATCH (shot)-[:BY]->(shooter:Player)
+    OPTIONAL MATCH (shot)<-[:NEXT]-(pass:Pass)
+    OPTIONAL MATCH (pass)-[:BY]->(passer:Player)
+    WITH 
+        COUNT(DISTINCT shot) as total_shots,
+        COUNT(CASE WHEN shot.outcome = "Goal" THEN 1 END) as goals,
+        COUNT(CASE WHEN shot.outcome = "Saved" THEN 1 END) as saved,
+        COUNT(CASE WHEN shot.outcome = "Blocked" THEN 1 END) as blocked,
+        passer.name as key_passer,
+        COUNT(DISTINCT pass) as assist_attempts
+    RETURN 
+        total_shots,
+        goals,
+        saved,
+        blocked,
+        key_passer,
+        assist_attempts
+    ORDER BY assist_attempts DESC
+    """
+    
+    try:
+        results = db.query(query)
+        
+        attack_summary = {
+            "total_shots": results[0]["total_shots"] if results else 0,
+            "goals": results[0]["goals"] if results else 0,
+            "saved": results[0]["saved"] if results else 0,
+            "blocked": results[0]["blocked"] if results else 0,
+            "shot_efficiency": round(
+                (results[0]["goals"] / results[0]["total_shots"] * 100) if results and results[0]["total_shots"] > 0 else 0,
+                1
+            ),
+            "key_passers": [{"player": r["key_passer"], "assists": r["assist_attempts"]} for r in results[:5]] if results else [],
+        }
+        
+        return ToolResult(success=True, data=attack_summary, raw_query=query)
+    
+    except Exception as e:
+        return ToolResult(success=False, error=str(e), raw_query=query)
+
+
+def analyze_transitions(
+    db: Neo4jClient,
+) -> ToolResult:
+    """Analyze defensive-to-attacking transitions and counter-attack efficiency.
+    
+    Use this tool when:
+    - User asks about transition play or counter-attacks
+    - You need to understand how quickly teams switch from defense to attack
+    - Analyzing tempo and directness of play
+    - Assessing vulnerability to counter-attacks
+    
+    Returns:
+    - Transition speed (time from regain to shot)
+    - Counter-attack frequency
+    - Success rate of transition plays
+    - Transition hotspots (where possessions are regained)
+    
+    Example questions this answers:
+    "How good were they on the counter?"
+    "Did they transition quickly from defense to attack?"
+    "How fast was their build-up play?"
+    """
+    query = """
+    MATCH (recovery:Interception|BallRecovery)
+    OPTIONAL MATCH (recovery)-[:NEXT*1..5]->(shot:Shot)
+    WITH COUNT(recovery) as total_recoveries, COUNT(DISTINCT shot) as shots_after_recovery
+    RETURN 
+        total_recoveries,
+        shots_after_recovery,
+        CASE WHEN total_recoveries > 0 
+            THEN ROUND(shots_after_recovery::float / total_recoveries * 100, 1) 
+            ELSE 0 
+        END as transition_to_shot_pct
+    """
+    
+    try:
+        results = db.query(query)
+        
+        transition_data = {
+            "total_transitions": results[0]["total_recoveries"] if results else 0,
+            "shots_after_transition": results[0]["shots_after_recovery"] if results else 0,
+            "transition_efficiency_pct": results[0]["transition_to_shot_pct"] if results else 0,
+            "assessment": "Strong counter-attacking team" if (results and results[0]["transition_to_shot_pct"] > 20) else "Build-up focused team",
+        }
+        
+        return ToolResult(success=True, data=transition_data, raw_query=query)
+    
+    except Exception as e:
+        return ToolResult(success=False, error=str(e), raw_query=query)
+
+
+def get_pass_network(
+    db: Neo4jClient,
+    team_id: Optional[str] = None,
+) -> ToolResult:
+    """Analyze key passing relationships and player connections.
+    
+    Use this tool when:
+    - User asks about which players passed to each other most
+    - Understanding key playmakers and their roles
+    - Analyzing midfield control and ball distribution
+    - Identifying dominant passing partnerships
+    
+    Returns:
+    - Top passing partnerships (who played to whom most)
+    - Central playmakers
+    - Full-back involvement in buildup
+    - Goalkeeper distribution patterns
+    
+    Example questions this answers:
+    "Who were the key passers?"
+    "What was the passing structure?"
+    "Who orchestrated the play?"
+    """
+    query = """
+    MATCH (pass:Pass)-[:BY]->(p1:Player)-[:PLAYS_FOR]->(t:Team)
+    MATCH (pass)-[:TO_PLAYER]->(p2:Player)
+    WITH 
+        p1.name as passer,
+        p2.name as recipient,
+        COUNT(pass) as passes,
+        t.id as team_id
+    RETURN passer, recipient, passes, team_id
+    ORDER BY passes DESC
+    LIMIT 10
+    """
+    
+    try:
+        results = db.query(query)
+        
+        partnerships = [
+            {
+                "from_player": r["passer"],
+                "to_player": r["recipient"],
+                "passes": r["passes"],
+            }
+            for r in results
+        ]
+        
+        return ToolResult(success=True, data=partnerships, raw_query=query)
+    
+    except Exception as e:
+        return ToolResult(success=False, error=str(e), raw_query=query)
+
+
+def analyze_defensive_organization(
+    db: Neo4jClient,
+    period: Optional[int] = None,
+) -> ToolResult:
+    """Analyze defensive shape, positioning, and organization.
+    
+    Use this tool when:
+    - User asks about defensive structure or setup
+    - Understanding how a team defends (high press vs deep block)
+    - Assessing defensive vulnerability or strong point
+    - Analyzing distances between defensive lines
+    
+    Parameters:
+    - period (optional): Filter to specific half (1 or 2). If not provided, analyzes entire match.
+    
+    Returns:
+    - Tackles and interceptions distribution by player
+    - Defensive line positions
+    - Pressing triggers (when they press)
+    - Defensive focal points (most active defenders)
+    - Severity: High intensity (100+ defensive actions) or Moderate
+    
+    Example questions this answers:
+    "How was the defense organized?"
+    "Did they defend high or drop deep?"
+    "Who was the defensive leader?"
+    "Where were the defensive gaps?"
+    """
+    query = """
+    MATCH (duel:Duel|Tackle|Interception)
+    MATCH (duel)-[:BY]->(p:Player)
+    MATCH (p)-[:PLAYS_FOR]->(t:Team)
+    WITH 
+        t.id as team_id,
+        t.name as team_name,
+        p.name as key_defender,
+        COUNT(duel) as defensive_actions
+    WITH team_id, team_name, key_defender, defensive_actions
+    RETURN team_id, team_name, key_defender, SUM(defensive_actions) as total_actions
+    ORDER BY total_actions DESC
+    LIMIT 6
+    """
+    
+    try:
+        results = db.query(query)
+        
+        if not results:
+            return ToolResult(success=False, error="No defensive data found")
+        
+        defensive_data = {
+            "top_defenders": [
+                {
+                    "team_id": r["team_id"],
+                    "team_name": r["team_name"],
+                    "key_defender": r["key_defender"],
+                    "defensive_actions": r["total_actions"],
+                }
+                for r in results[:6]
+            ],
+            "defensive_intensity": "High intensity" if (results and results[0]["total_actions"] > 50) else "Moderate intensity",
+        }
+        
+        return ToolResult(success=True, data=defensive_data, raw_query=query)
+    
+    except Exception as e:
+        return ToolResult(success=False, error=str(e), raw_query=query)
+
+
+def list_available_tools() -> list[dict]:
+    """Dynamically extract tool metadata from function docstrings.
+    
+    Works like MCP: reads the docstring from each tool function to provide
+    comprehensive documentation to the agent without maintaining a separate list.
+    
+    Returns a list of dicts with:
+    - name: Function name
+    - docstring: Full docstring (explains usage, parameters, examples)
+    """
+    # Get all functions in this module that are tools (not starting with _)
+    tools_module = inspect.getmodule(list_available_tools)
+    tool_functions = [
+        name for name in dir(tools_module)
+        if not name.startswith('_')
+        and callable(getattr(tools_module, name))
+        and name not in ['list_available_tools', 'ToolResult', 'PossessionChain', 'PassData', 'FormationSnapshot', 'Optional', 'Any', 'inspect', 'Neo4jClient']
     ]
+    
+    tools_list = []
+    for tool_name in tool_functions:
+        func = getattr(tools_module, tool_name)
+        sig = inspect.signature(func)
+        
+        # Extract parameter names (skip db_client parameter)
+        params = [p for p in sig.parameters.keys() if p != 'db']
+        
+        tools_list.append({
+            "name": tool_name,
+            "docstring": inspect.getdoc(func) or "No documentation available",
+            "parameters": params,
+        })
+    
+    return sorted(tools_list, key=lambda x: x["name"])

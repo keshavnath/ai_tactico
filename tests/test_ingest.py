@@ -105,16 +105,17 @@ def sample_event_data():
 
 def test_ingestion_creates_match_node(schema_client, sample_event_data):
     """Test that ingestion creates a Match node."""
+    match_id = schema_client._test_match_id
     ingestion = StatsBombIngestion(schema_client)
     
     # Manually call the load functions (normally called by ingest())
     match_info = ingestion._extract_match_info(sample_event_data)
     schema_client.execute(
         "CREATE (m:Match {id: $id, loaded_at: datetime()})",
-        {"id": "test_match"}
+        {"id": match_id}
     )
     
-    result = schema_client.query("MATCH (m:Match {id: 'test_match'}) RETURN m")
+    result = schema_client.query(f"MATCH (m:Match {{id: '{match_id}'}}) RETURN m")
     assert len(result) == 1
 
 

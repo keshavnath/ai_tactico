@@ -68,6 +68,6 @@ class AgentState(BaseModel):
 class ToolResult(BaseModel):
     """Structured result from a tool call."""
     success: bool
-    data: Any
+    data: Optional[Any] = None
     error: Optional[str] = None
     raw_query: Optional[str] = None  # For debugging

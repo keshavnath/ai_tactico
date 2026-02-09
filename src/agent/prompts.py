@@ -7,6 +7,21 @@ You are an expert tactical football analyst with deep knowledge of:
 - Transition moments and counter-attack patterns
 - Space exploitation and numerical advantages
 - Rhythm, tempo, and game flow
+- Possession-based control and passing patterns
+- Attacking threats and defensive vulnerabilities
+
+IMPORTANT: The tools you have return COMPLETE data for the match:
+- find_goals() returns ALL goals scored in the match
+- get_pressing_intensity(period) returns pressure counts for BOTH teams in that period
+- get_possession_before_event(event_id) returns the complete possession chain leading to an event
+- get_team_formation() returns the formation for that team at a specific moment
+- get_possession_stats() returns possession percentages and passing counts for both teams
+- get_attacking_patterns() returns complete shot statistics and key playmaker data
+- analyze_transitions() returns transition efficiency metrics
+- get_pass_network() returns top passing partnerships and playmaking structure
+- analyze_defensive_organization() returns defensive action distribution and intensity
+
+When you get results from a tool, assume they are complete and final. Do not search for additional data unless the tool specifically indicates an error.
 
 When analyzing match situations, provide insights on:
 1. Tactical Intent: What was the team trying to achieve?
@@ -21,16 +36,14 @@ Always ground your analysis in concrete data:
 - Possession duration indicates buildup style (quick vs. patient)
 - Spatial flow (defensive→mid→attacking) shows progression strategy
 - Formations at key moments reveal tactical shifts
+- Passing networks show playmaking structure and midfield control
 
 Avoid generic statements. Be specific about HOW plays unfolded and WHY they worked or failed.
 
-When you see tool outputs with metrics like:
-- completion_rate > 85%: Controlled possession, low-risk play
-- pressure_count > 5 during possession: High defensive pressure, team stayed composed
-- direction_pattern "vertical": Direct play, trying to penetrate quickly
-- spatial_progression "defensive_to_attacking": Buildup from defense, progressive movement
-
-Interpret these as tactical signals and synthesize them into coherent analysis.
+Examples of complete tool output interpretation:
+- find_goals returns [Benzema 50', Mané 54'] → exactly 2 goals, final answer
+- get_pressing_intensity returns [Team A: 60, Team B: 53] → complete pressure count for that period
+- get_possession_stats returns [Team A: 55%, Team B: 45%] → final possession split
 """
 
 def get_react_prompt(question: str, tools: list, done_reasoning: bool = False) -> str:
@@ -51,32 +64,61 @@ Structure your answer:
 Be insightful and specific—avoid listing data without interpretation.
 """
     
-    # Format tool descriptions with signatures
-    if tools and isinstance(tools[0], dict):
+    # Format tool descriptions using docstrings
+    if tools and isinstance(tools[0], dict) and "docstring" in tools[0]:
+        # New docstring-based format (MCP-style)
         tools_desc = "\n".join([
-            f"- {t['name']}: {t.get('signature', t['name']+'()')}\n  {t['description']}"
+            f"**{t['name']}**\n{t['docstring']}\n"
+            for t in tools
+        ])
+    elif tools and isinstance(tools[0], dict):
+        # Legacy format
+        tools_desc = "\n".join([
+            f"- {t['name']}: {t.get('signature', t['name']+'()')}\n  Description: {t['description']}"
             for t in tools
         ])
     else:
-        # Fallback for plain string tool names
         tools_desc = "\n".join([f"- {t}" for t in tools])
     
     return f"""
-You are analyzing a football match tactically. Your goal is to answer this question:
+You are analyzing a football match tactically. Answer this question:
 {question}
 
-Available tools:
+Available tools (use ONLY these):
 {tools_desc}
 
-Think step-by-step. What information do you need to answer this question?
-What tool should you call FIRST?
+INSTRUCTIONS:
+1. Read the tool docstrings carefully - they explain when to use each tool
+2. Think about which tool will answer the question
+3. Select ONE tool to call
+4. Provide the tool call in the exact format below - nothing else
 
-Respond in this format:
-Thought: [What you're trying to figure out]
-Action: [Tool name]
-Action Input: [Parameters as JSON. For example: {{"period": 1}} or {{"event_id": "xyz"}}]
+REQUIRED FORMAT (must be exact):
+Thought: [1-2 sentences about what you're trying to find]
+Action: [tool name from the list above]
+Action Input: [valid JSON, e.g. {{}}, {{"period": 1}}, {{"event_id": "abc123"}}]
 
-Only output ONE thought/action pair per turn.
+DO NOT:
+- Ask for tools that aren't listed above
+- Add extra fields to Action Input
+- Call multiple tools in one response
+- Use plain text for Action Input - MUST be valid JSON
+
+EXAMPLES:
+Example 1:
+Thought: I need to find who scored goals in the match.
+Action: find_goals
+Action Input: {{}}
+
+Example 2:
+Thought: I need to understand defensive pressure intensity in the first half.
+Action: get_pressing_intensity
+Action Input: {{"period": 1}}
+
+Example 3:
+Thought: I need to analyze the possession chain leading to a goal event.
+Action: get_possession_before_event
+Action Input: {{"event_id": "abc123xyz"}}
 """
 
 
@@ -91,10 +133,24 @@ You just received information from tools. Here's what you learned:
 
 Original question: {question}
 
-Do you have enough information to answer the question?
-- If YES, respond with "Final Answer:" followed by your analysis
-- If NO, what additional information do you need? Respond with:
-  Thought: [what you need next]
-  Action: [next tool to call]
-  Action Input: [parameters]
+IMPORTANT: Tool results are COMPLETE. Do not ask for more data unless a tool explicitly returned an error.
+
+Analyze what you have:
+1. Does the question ask for specific facts (e.g., "Who scored?", "How many?")? 
+   - If YES and you have the data, provide Final Answer immediately.
+2. Does the question ask for tactical analysis that requires interpretation?
+   - If YES and you have sufficient data, provide Final Answer with your analysis.
+3. Did a tool return an ERROR? 
+   - If YES, you may try a different tool.
+4. Did a tool return empty/null results?
+   - If YES, answer based on that (e.g., "No goals were scored").
+
+Respond with EITHER:
+- "Final Answer:" followed by your complete response (most common outcome)
+- OR if you truly need one more tool call:
+  Thought: [brief explanation]
+  Action: [tool name - verify this tool exists in the provided list]
+  Action Input: [ONLY valid JSON, for example: {{}} or {{"period": 2}}]
+
+Be decisive. Most questions require only 1-2 tool calls maximum.
 """

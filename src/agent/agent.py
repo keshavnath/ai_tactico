@@ -43,7 +43,15 @@ class TacticalAgent:
                 "end": END,
             }
         )
-        workflow.add_edge("reflect", "think")
+        # After reflect, check if we should continue
+        workflow.add_conditional_edges(
+            "reflect",
+            self._should_continue,
+            {
+                "reflect": "think",  # Continue reasoning if needed
+                "end": END,           # Or stop if final answer is ready
+            }
+        )
         workflow.add_edge("answer", END)
         
         workflow.set_entry_point("think")
@@ -80,36 +88,52 @@ class TacticalAgent:
             re.IGNORECASE | re.DOTALL
         )
         
-        if not action_match or not input_match:
-            print("[ACT] No tool call found in thought")
+        if not action_match:
+            print("[ACT] ERROR: No 'Action:' found in response")
+            print("[ACT] Expected format: Action: [tool_name]")
+            return state
+        
+        if not input_match:
+            print("[ACT] ERROR: No 'Action Input:' JSON found in response")
+            print("[ACT] Expected format: Action Input: {} or {'period': 1}")
             return state
         
         tool_name = action_match.group(1)
-        try:
-            tool_input = json.loads(input_match.group(1))
-        except json.JSONDecodeError:
-            print(f"[ACT] Failed to parse tool input")
+        
+        # Validate tool exists
+        valid_tools = [t["name"] for t in tools.list_available_tools()]
+        if tool_name not in valid_tools:
+            print(f"[ACT] ERROR: Tool '{tool_name}' not found")
+            print(f"[ACT] Available tools: {', '.join(valid_tools)}")
             return state
         
+        # Parse JSON input
+        try:
+            tool_input = json.loads(input_match.group(1))
+        except json.JSONDecodeError as e:
+            print(f"[ACT] ERROR: Invalid JSON in Action Input")
+            print(f"[ACT] Parse error: {str(e)}")
+            print(f"[ACT] Got: {input_match.group(1)[:100]}")
+            return state
+        
+        # Auto-inject period default if missing
         if tool_name == "get_pressing_intensity" and "period" not in tool_input:
             tool_input["period"] = 1
         
+        # Execute tool
         print(f"[ACT] Calling {tool_name}({tool_input})")
         tool_func = getattr(tools, tool_name, None)
-        if not tool_func:
-            result = ToolResult(success=False, error=f"Unknown tool: {tool_name}")
-            print(f"[ACT] ERROR: Unknown tool")
-        else:
-            try:
-                result = tool_func(self.db, **tool_input)
-                if result.success:
-                    data_preview = str(result.data)[:100]
-                    print(f"[ACT] Success: {data_preview}")
-                else:
-                    print(f"[ACT] Tool error: {result.error}")
-            except TypeError as e:
-                result = ToolResult(success=False, error=f"Tool call error: {str(e)}")
-                print(f"[ACT] Execution error: {e}")
+        
+        try:
+            result = tool_func(self.db, **tool_input)
+            if result.success:
+                data_preview = str(result.data)[:100]
+                print(f"[ACT] Success: {data_preview}")
+            else:
+                print(f"[ACT] Tool error: {result.error}")
+        except Exception as e:
+            result = ToolResult(success=False, error=f"Execution failed: {str(e)}")
+            print(f"[ACT] Execution error: {e}")
         
         state.tool_calls.append((tool_name, tool_input))
         state.tool_results.append(result)
@@ -180,12 +204,16 @@ class TacticalAgent:
     
     def _should_continue(self, state: AgentState) -> str:
         """Decide if we should continue reasoning or finalize answer."""
+        # Hard limit on iterations
         if len(state.tool_calls) >= self.max_iterations:
+            print(f"\n[STOP] Max iterations ({self.max_iterations}) reached")
             return "end"
         
+        # If we have a final answer, stop
         if state.final_answer:
             return "end"
         
+        # If LLM explicitly said "Final Answer:", stop
         last_thought = state.thoughts[-1] if state.thoughts else ""
         if "Final Answer:" in last_thought:
             return "end"
@@ -203,13 +231,26 @@ class TacticalAgent:
         print(f"{'='*60}")
         
         initial_state = AgentState(user_question=question)
-        final_state: AgentState = self.graph.invoke(initial_state)
+        final_state = self.graph.invoke(initial_state)
+        
+        # Debug: check final state type
+        if isinstance(final_state, dict):
+            print(f"DEBUG: final_state is a dict: {list(final_state.keys())}")
+            # Try to extract from dict
+            if "thoughts" in final_state:
+                num_iterations = len(final_state["thoughts"])
+            else:
+                num_iterations = 0
+            final_answer = final_state.get("final_answer", "Unable to generate analysis")
+        else:
+            num_iterations = len(final_state.thoughts)
+            final_answer = final_state.final_answer or "Unable to generate analysis"
         
         print(f"\n{'='*60}")
-        print(f"Analysis complete in {len(final_state.thoughts)} iterations")
+        print(f"Analysis complete in {num_iterations} iterations")
         print(f"{'='*60}\n")
         
-        return final_state.final_answer or "Unable to generate analysis"
+        return final_answer
 
 
 def create_agent(

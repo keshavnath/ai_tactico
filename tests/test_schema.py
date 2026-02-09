@@ -38,17 +38,21 @@ def test_schema_creates_indexes(client):
 
 def test_constraint_prevents_duplicates(schema_client):
     """Test that uniqueness constraint prevents duplicate node IDs."""
-    # Create first match
-    schema_client.execute("""
-    CREATE (m:Match {id: 'match_1', loaded_at: datetime()})
-    """)
+    match_id = schema_client._test_match_id
+    
+    # Create first match with unique ID
+    schema_client.execute(
+        "CREATE (m:Match {id: $id, loaded_at: datetime()})",
+        {"id": match_id}
+    )
     
     # Try to create duplicate
     try:
-        schema_client.execute("""
-        CREATE (m:Match {id: 'match_1', loaded_at: datetime()})
-        """)
-        # Should raise an error
-        assert False, "Expected constraint violation"
+        schema_client.execute(
+            "CREATE (m:Match {id: $id, loaded_at: datetime()})",
+            {"id": match_id}
+        )
+        assert False, "Should have raised ConstraintError"
     except Exception as e:
-        assert "ConstraintValidationFailed" in str(e) or "already exists" in str(e)
+        # Expected to fail
+        assert "ConstraintValidationFailed" in str(e.__class__.__name__) or "already exists" in str(e)
