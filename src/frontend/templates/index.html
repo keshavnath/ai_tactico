@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Tactico - Tactical Football Analysis</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <h1>AI Tactico</h1>
+            <p>Tactical Football Analysis Agent</p>
+        </header>
+
+        <!-- Match Info -->
+        <section class="match-info">
+            {% if match %}
+                <div class="match-details">
+                    <div class="info-item">
+                        <label>Match ID:</label>
+                        <span>{{ match.match_id }}</span>
+                    </div>
+                    {% if match.teams %}
+                    <div class="info-item">
+                        <label>Teams:</label>
+                        <span>{{ match.teams|join(' vs ') }}</span>
+                    </div>
+                    {% endif %}
+                    {% if match.event_count %}
+                    <div class="info-item">
+                        <label>Events:</label>
+                        <span>{{ match.event_count }}</span>
+                    </div>
+                    {% endif %}
+                </div>
+            {% else %}
+                <p class="no-data">No match data loaded</p>
+            {% endif %}
+        </section>
+
+        <!-- Q&A Interface -->
+        <section class="qa-section">
+            <h2>Ask About the Match</h2>
+            
+            <!-- Question Form -->
+            <div class="question-form">
+                <textarea 
+                    id="questionInput" 
+                    class="question-input"
+                    placeholder="Ask a tactical question about the match..."
+                    rows="3"
+                ></textarea>
+                <button id="submitBtn" class="submit-btn">Analyze</button>
+            </div>
+
+            <!-- Messages -->
+            <div id="messages" class="messages">
+                <!-- Messages will appear here -->
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>Built with Neo4j, LangGraph, and Ollama</p>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
