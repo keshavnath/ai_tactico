@@ -63,6 +63,9 @@ class AgentState(BaseModel):
     # Answer tracking
     final_answer: Optional[str] = None
     confidence: float = 0.0
+    
+    # Failure tracking (for debugging)
+    parse_failures: int = 0  # Count of failed action parsing attempts
 
 
 class ToolResult(BaseModel):

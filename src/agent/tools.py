@@ -10,39 +10,31 @@ import inspect
 from src.db import Neo4jClient
 from .schemas import PossessionChain, PassData, FormationSnapshot, ToolResult
 from typing import Optional, Any
+import re
 
 
 def find_events(
     db: Neo4jClient,
     event_type: Optional[str] = None,
     minute: Optional[int] = None,
+    minute_min: Optional[int] = None,
+    minute_max: Optional[int] = None,
     player: Optional[str] = None,
     team: Optional[str] = None,
     outcome: Optional[str] = None,
+    limit: int = 20,
 ) -> ToolResult:
-    """Find events in the match by type, minute, player, team, or outcome.
+    """Find events by type, time, player, team, or outcome.
     
-    Use this tool FIRST when you need to locate a specific event to analyze.
-    This is your way to discover events - you need event_id before analyzing buildup.
+    Parameters:
+    - event_type: Pass, Shot, Tackle, Duel, Pressure, Carry, Block, Interception, Clearance, Foul Committed, Goal Keeper, Ball Recovery, Ball Receipt*, Dispossessed, 50/50, Out
+    - minute_min/minute_max: time window
+    - player: player name substring
+    - team: team name substring
+    - outcome: Goal, Miss, Saved, etc.
+    - limit: max results
     
-    Parameters (all optional - use any combination):
-    - event_type: "Shot", "Pass", "Tackle", "Duel", "Pressure", "Interception", "BallRecovery", etc.
-    - minute: specific minute (e.g., 35)
-    - player: player name (e.g., "Benzema")
-    - team: team name (e.g., "Real Madrid")
-    - outcome: "Goal", "Miss", "Saved", "YellowCard", etc.
-    
-    Returns:
-    - List of events matching criteria
-    - Each with: event_id, type, minute, period, player, team, outcome
-    
-    Example usage patterns:
-    "What happened at minute 45?" → find_events(minute=45)
-    "Show me Benzema's shots" → find_events(event_type="Shot", player="Benzema")
-    "Find the first goal" → find_events(event_type="Shot", outcome="Goal")
-    "Find the tackle at minute 35" → find_events(event_type="Tackle", minute=35)
-    "Get yellow cards by Bayern" → find_events(outcome="YellowCard", team="Bayern")
-    "All Real Madrid goals" → find_events(event_type="Shot", outcome="Goal", team="Real Madrid")
+    Examples: find_events(event_type="Shot", player="Benzema") or find_events(event_type="Tackle", minute_min=30, minute_max=45)
     """
     params = {}
     
@@ -53,56 +45,72 @@ def find_events(
         if not outcome:
             outcome = "Goal"
     
-    # Build MATCH clause for event
+    # Build MATCH clause for event (all events are :Event nodes with type property)
+    match_clause = "MATCH (event:Event)"
     if event_type:
-        match_clause = f"MATCH (event:{event_type})"
-    else:
-        match_clause = "MATCH (event:Event)"
+        where_type_condition = f"event.type = '{event_type}'"
     
     # Build WHERE conditions
     where_conditions = []
-    if minute:
+    if event_type:
+        where_conditions.append(where_type_condition)
+    if minute is not None:
         where_conditions.append(f"event.minute = {minute}")
+    if minute_min is not None:
+        where_conditions.append(f"event.minute >= {minute_min}")
+    if minute_max is not None:
+        where_conditions.append(f"event.minute <= {minute_max}")
+    
+    # Check for outcome in event-type-specific fields
     if outcome:
-        where_conditions.append(f"event.outcome = '{outcome}'")
+        # For shots, check shot_outcome
+        outcome_checks = [
+            f"event.shot_outcome = $outcome",  # Shot events
+            f"event.pass_outcome = $outcome",  # Pass events
+            f"event.duel_outcome = $outcome",  # Duel events
+            f"event.foul_outcome = $outcome",  # Foul events
+            f"event.tackle_outcome = $outcome",  # Tackle events
+            f"event.interception_outcome = $outcome",  # Interception events
+        ]
+        where_conditions.append(f"({' OR '.join(outcome_checks)})")
+        params["outcome"] = outcome
     
     where_clause = ""
     if where_conditions:
         where_clause = "WHERE " + " AND ".join(where_conditions)
     
-    # Add player/team filtering if needed
-    extra_match = ""
-    if player or team:
-        extra_match = "\nMATCH (event)-[:BY]->(p:Player)"
-        if player:
-            params["player"] = player
-            if where_clause:
-                where_clause += f"\nAND p.name = $player"
-            else:
-                where_clause = f"WHERE p.name = $player"
-        
-        if team:
-            extra_match += "\nMATCH (p)-[:PLAYS_FOR]->(t:Team)"
-            params["team"] = team
-            if where_clause:
-                where_clause += f"\nAND t.name = $team"
-            else:
-                where_clause = f"WHERE t.name = $team"
-    else:
-        extra_match = "\nOPTIONAL MATCH (event)-[:BY]->(p:Player)\nOPTIONAL MATCH (p)-[:PLAYS_FOR]->(t:Team)"
+    # Add player filter if specified (now using flattened player_name property)
+    if player:
+        params["player"] = player.lower()
+        if where_clause:
+            where_clause += f"\nAND LOWER(event.player_name) CONTAINS $player"
+        else:
+            where_clause = f"WHERE LOWER(event.player_name) CONTAINS $player"
     
-    query = f"""{match_clause}{extra_match}
+    # Add team filter if specified (now using flattened team_name property)
+    if team:
+        params["team"] = team.lower()
+        if where_clause:
+            where_clause += f"\nAND LOWER(event.team_name) CONTAINS $team"
+        else:
+            where_clause = f"WHERE LOWER(event.team_name) CONTAINS $team"
+    
+    query = f"""{match_clause}
 {where_clause}
 RETURN 
     event.id as event_id,
     event.type as event_type,
     event.minute as minute,
     event.period as period,
-    p.name as player,
-    t.name as team,
-    event.outcome as outcome
+    COALESCE(event.player_name, 'N/A') as player,
+    COALESCE(event.team_name, 'N/A') as team,
+    COALESCE(event.shot_outcome, event.pass_outcome, event.duel_outcome, 'N/A') as outcome,
+    event.shot_key_pass_id as key_pass_id,
+    event.shot_xg as xg,
+    event.location_x as location_x,
+    event.location_y as location_y
 ORDER BY event.minute ASC
-LIMIT 20"""
+LIMIT {limit}"""
     
     try:
         results = db.query(query, params)
@@ -119,6 +127,9 @@ LIMIT 20"""
                 "player": r["player"],
                 "team": r["team"],
                 "outcome": r["outcome"],
+                **( {"key_pass_id": r["key_pass_id"]} if r.get("key_pass_id") else {}),
+                **( {"xg": round(r["xg"], 3)} if r.get("xg") else {}),
+                **( {"location": (r["location_x"], r["location_y"])} if r.get("location_x") else {}),
             }
             for r in results
         ]
@@ -129,50 +140,117 @@ LIMIT 20"""
         return ToolResult(success=False, error=str(e), raw_query=query)
 
 
+def find_goals(
+    db: Neo4jClient,
+    team: Optional[str] = None,
+    player: Optional[str] = None,
+    minute_min: Optional[int] = None,
+    minute_max: Optional[int] = None,
+) -> ToolResult:
+    """Find all goals in match, optionally by team, player, or time window.
+    
+    Parameters:
+    - team: team name substring
+    - player: player name substring (scorer)
+    - minute_min/minute_max: time window
+    
+    Returns goals with: event_id, minute, scorer, team, key_pass_id.
+    
+    Examples: find_goals(player="Benzema") or find_goals(team="Real Madrid", minute_min=0, minute_max=20)
+    """
+    where_conditions = []
+    params = {}
+    
+    # Build WHERE conditions - ensure we only get Shot events
+    where_conditions.append("event.type = 'Shot'")
+    where_conditions.append("event.shot_outcome = 'Goal'")
+    
+    if minute_min is not None:
+        where_conditions.append(f"event.minute >= {minute_min}")
+    if minute_max is not None:
+        where_conditions.append(f"event.minute <= {minute_max}")
+    
+    where_clause = "WHERE " + " AND ".join(where_conditions)
+    
+    # Add player filter if specified (using flattened player_name property)
+    if player:
+        params["player"] = player.lower()
+        where_clause += f"\nAND LOWER(event.player_name) CONTAINS $player"
+    
+    # Add team filter if specified (using flattened team_name property)
+    if team:
+        params["team"] = team.lower()
+        where_clause += f"\nAND LOWER(event.team_name) CONTAINS $team"
+    
+    query = f"""MATCH (event:Event)
+{where_clause}
+RETURN 
+    event.id as event_id,
+    event.minute as minute,
+    event.period as period,
+    COALESCE(event.player_name, 'Unknown') as scorer,
+    COALESCE(event.team_name, 'Unknown') as team,
+    event.shot_key_pass_id as key_pass_id
+ORDER BY event.minute ASC"""
+    
+    try:
+        results = db.query(query, params)
+        
+        if not results:
+            return ToolResult(success=False, error="No goals found matching criteria")
+        
+        goals = [
+            {
+                "event_id": r["event_id"],
+                "minute": r["minute"],
+                "period": r["period"],
+                "scorer": r["scorer"],
+                "team": r["team"],
+                "key_pass_id": r["key_pass_id"],
+            }
+            for r in results
+        ]
+        
+        return ToolResult(success=True, data=goals, raw_query=query)
+    
+    except Exception as e:
+        return ToolResult(success=False, error=str(e), raw_query=query)
+
+
 def get_event_context(
     db: Neo4jClient,
     event_id: str,
 ) -> ToolResult:
-    """Get the full context around a specific event: possession chain, teams, timing.
-    
-    Use this tool AFTER find_events() to get the buildup leading to an event.
-    Works for ANY event type: goals, tackles, shots, etc.
-    
-    Steps:
-    1. User asks about a specific moment/event
-    2. You call find_events() to get event_id(s)
-    3. You call THIS tool with the event_id to get the context/buildup
+    """Get full buildup (possession chain) leading to an event - detailed tactical analysis.
     
     Parameters:
-    - event_id: The event ID from find_events() result
+    - event_id: event ID from find_events() or find_goals()
     
-    Returns:
-    - Complete possession chain leading up to the event
-    - Includes all passes before the event in that possession sequence
-    - Shows: player → recipient chains before the key moment
-    
-    Example flow:
-    1. find_events(minute=50, event_type="Shot", outcome="Goal")
-       → returns event_id "shot_2345"
-    2. get_event_context(event_id="shot_2345")
-       → returns 12-pass buildup: "Modric → Benzema → Kroos → ..."
-    3. Analyze and answer
+    Returns: complete passes leading up to the event with all tactical details (coordinates, angles, distances).
+    Use for: detailed tactical breakdowns, comprehensive analysis, understanding spatial flow.
     """
     query = """
-    MATCH (e:Event {id: $event_id})
-    OPTIONAL MATCH (pos:Possession)-[:CONTAINS]->(e)
-    OPTIONAL MATCH (pos)-[:CONTAINS]->(pass_event:Pass)
-    MATCH (pass_event)-[:BY]->(passer:Player)
-    OPTIONAL MATCH (pass_event)-[:TO_PLAYER]->(recipient:Player)
+    MATCH (target_event:Event {id: $event_id})
+    MATCH (pos:Possession)-[:CONTAINS]->(target_event)
+    MATCH (pos)-[:CONTAINS]->(event:Event)
+    WHERE event.type = 'Pass'
+    WITH target_event, event
+    ORDER BY event.minute ASC, event.second ASC
     RETURN 
-        e.type as event_type,
-        e.minute as event_minute,
-        e.period as event_period,
-        e.outcome as event_outcome,
-        passer.name as player_name,
-        recipient.name as recipient_name,
-        pass_event.minute as minute
-    ORDER BY pass_event.minute ASC
+        target_event.type as event_type,
+        target_event.minute as event_minute,
+        target_event.period as event_period,
+        COALESCE(target_event.shot_outcome, target_event.pass_outcome, target_event.duel_outcome) as event_outcome,
+        event.player_name as player_name,
+        event.pass_recipient_name as recipient_name,
+        event.minute as minute,
+        event.second as second,
+        event.pass_length as pass_length,
+        event.pass_angle as pass_angle,
+        event.location_x as location_x,
+        event.location_y as location_y,
+        event.end_location_x as end_location_x,
+        event.end_location_y as end_location_y
     """
     
     try:
@@ -205,12 +283,28 @@ def get_event_context(
                     "from": r["player_name"],
                     "to": r["recipient_name"],
                     "minute": r["minute"],
+                    "second": r["second"],
+                    "length": r["pass_length"],
+                    "angle": r["pass_angle"],
+                    "start_location": (r["location_x"], r["location_y"]) if r["location_x"] else None,
+                    "end_location": (r["end_location_x"], r["end_location_y"]) if r["end_location_x"] else None,
                 })
+        
+        # Build readable chain narrative
+        chain_parts = []
+        for p in passes:
+            if p["to"]:
+                chain_parts.append(f"{p['from']} → {p['to']}")
+            else:
+                chain_parts.append(f"{p['from']} (incomplete)")
+        
+        chain_narrative = " → ".join(chain_parts) if chain_parts else "No passes in possession"
         
         return ToolResult(
             success=True,
             data={
                 "event": event_info,
+                "buildup_chain": chain_narrative,
                 "buildup_passes": passes,
                 "total_passes": len(passes),
             },
@@ -219,6 +313,332 @@ def get_event_context(
     
     except Exception as e:
         return ToolResult(success=False, error=str(e), raw_query=query)
+
+
+def get_event_summary(
+    db: Neo4jClient,
+    event_id: str,
+) -> ToolResult:
+    """Get key moments leading to an event - concise summary for quick understanding.
+    
+    Parameters:
+    - event_id: event ID from find_events() or find_goals()
+    
+    Returns: 3-5 key passes only (filters incomplete passes) with minimal details (players, distance, time).
+    Use for: quick answers, post-game summaries, understanding main sequences without deep analysis.
+    """
+    query = """
+    MATCH (target_event:Event {id: $event_id})
+    MATCH (pos:Possession)-[:CONTAINS]->(target_event)
+    MATCH (pos)-[:CONTAINS]->(event:Event)
+    WHERE event.type = 'Pass'
+    WITH target_event, event
+    ORDER BY event.minute ASC, event.second ASC
+    RETURN 
+        target_event.type as event_type,
+        target_event.minute as event_minute,
+        target_event.period as event_period,
+        COALESCE(target_event.shot_outcome, target_event.pass_outcome, target_event.duel_outcome) as event_outcome,
+        event.player_name as player_name,
+        event.pass_recipient_name as recipient_name,
+        event.minute as minute,
+        event.second as second,
+        event.pass_length as pass_length
+    """
+    
+    try:
+        results = db.query(query, {"event_id": event_id})
+        
+        if not results:
+            return ToolResult(
+                success=False,
+                error=f"No context found for event {event_id}"
+            )
+        
+        # Extract event info
+        event_info = {
+            "event_type": results[0]["event_type"],
+            "event_minute": results[0]["event_minute"],
+            "event_period": results[0]["event_period"],
+            "event_outcome": results[0]["event_outcome"],
+        }
+        
+        # Filter complete passes (with recipient), take last 5
+        complete_passes = [
+            {
+                "from": r["player_name"],
+                "to": r["recipient_name"],
+                "time": f"{r['minute']}:{r['second']:02d}",
+                "distance_m": round(r["pass_length"], 1) if r["pass_length"] else None,
+            }
+            for r in results
+            if r["player_name"] and r["recipient_name"]
+        ]
+        
+        # Keep last 5 key passes (most relevant to the event)
+        key_passes = complete_passes[-5:] if len(complete_passes) > 5 else complete_passes
+        
+        # Build chain narrative
+        chain_parts = [f"{p['from']} → {p['to']}" for p in key_passes]
+        chain_narrative = " → ".join(chain_parts) if chain_parts else "No complete passes"
+        
+        return ToolResult(
+            success=True,
+            data={
+                "event": event_info,
+                "key_sequence": chain_narrative,
+                "key_passes": key_passes,
+                "pass_count": len(key_passes),
+            },
+            raw_query=query
+        )
+    
+    except Exception as e:
+        return ToolResult(success=False, error=str(e), raw_query=query)
+
+def get_player_actions(
+    db: Neo4jClient,
+    event_type: Optional[str] = None,
+    team: Optional[str] = None,
+    player: Optional[str] = None,
+    minute_min: Optional[int] = None,
+    minute_max: Optional[int] = None,
+    limit: int = 10,
+) -> ToolResult:
+    """Get player actions by event type, time window, team, or player.\n    \n    Parameters:\n    - event_type: Pressure, Tackle, Interception, Duel, Ball Recovery, etc.\n    - team: team name\n    - player: player name\n    - minute_min/minute_max: time window\n    - limit: max results\n    \n    Examples: get_player_actions(event_type=\"Tackle\", team=\"Real Madrid\") or get_player_actions(event_type=\"Pressure\", minute_min=0, minute_max=20)\n    """
+    params = {}
+    
+    # All events are :Event nodes with type property
+    match_clause = "MATCH (event:Event)"
+    where_conditions = []
+    
+    # Add type condition
+    if event_type:
+        where_conditions.append(f"event.type = '{event_type}'")
+    else:
+        # If no event type specified, match common action types
+        where_conditions.append("event.type IN ['Pressure', 'Tackle', 'Interception', 'Duel', 'Ball Recovery']")
+    
+    # Time window filtering
+    if minute_min is not None:
+        where_conditions.append(f"event.minute >= {minute_min}")
+    if minute_max is not None:
+        where_conditions.append(f"event.minute <= {minute_max}")
+    
+    where_clause = ""
+    if where_conditions:
+        where_clause = "WHERE " + " AND ".join(where_conditions)
+    
+    # Player/team filtering using flattened properties
+    if player:
+        params["player"] = player.lower()
+        if where_clause:
+            where_clause += f"\nAND LOWER(event.player_name) CONTAINS $player"
+        else:
+            where_clause = f"WHERE LOWER(event.player_name) CONTAINS $player"
+    
+    if team:
+        params["team"] = team.lower()
+        if where_clause:
+            where_clause += f"\nAND LOWER(event.team_name) CONTAINS $team"
+        else:
+            where_clause = f"WHERE LOWER(event.team_name) CONTAINS $team"
+    
+    query = f"""{match_clause}
+{where_clause}
+WITH event.team_name as team, event.player_name as player, COUNT(event) as action_count
+RETURN team, player, action_count
+ORDER BY action_count DESC
+LIMIT {limit}"""
+    
+    try:
+        results = db.query(query, params)
+        
+        if not results:
+            error_msg = f"No {event_type or 'action'} events found"
+            if minute_min or minute_max:
+                error_msg += f" in minute range {minute_min or 0}-{minute_max or 90}"
+            return ToolResult(success=False, error=error_msg)
+        
+        actions_data = [
+            {
+                "team": r["team"],
+                "player": r["player"],
+                "action_count": r["action_count"],
+            }
+            for r in results
+        ]
+        
+        return ToolResult(success=True, data=actions_data, raw_query=query)
+    
+    except Exception as e:
+        return ToolResult(success=False, error=str(e), raw_query=query)
+
+
+def get_passing_pairs(
+    db: Neo4jClient,
+    team: Optional[str] = None,
+    player: Optional[str] = None,
+    minute_min: Optional[int] = None,
+    minute_max: Optional[int] = None,
+    limit: int = 10,
+) -> ToolResult:
+    """Get passing partnerships: passer-recipient pairs and pass counts.
+    
+    Parameters: team, player (passer), minute_min, minute_max, limit.
+    Does NOT have event_type parameter - only returns Pass events.
+    
+    Examples: get_passing_pairs(team="Real Madrid") or get_passing_pairs(player="Benzema", minute_min=45, minute_max=90)
+    """
+    where_conditions = []
+    params = {}
+    
+    match_clause = "MATCH (pass:Event)"
+    where_conditions.append("pass.type = 'Pass'")
+    
+    # Time window filtering
+    if minute_min is not None:
+        where_conditions.append(f"pass.minute >= {minute_min}")
+    if minute_max is not None:
+        where_conditions.append(f"pass.minute <= {minute_max}")
+    
+    # Player filtering (using flattened player_name and pass_recipient_name)
+    if player:
+        params["player"] = player.lower()
+        where_conditions.append("LOWER(pass.player_name) CONTAINS $player")
+    
+    # Team filtering (using flattened team_name)
+    if team:
+        params["team"] = team.lower()
+        where_conditions.append("LOWER(pass.team_name) CONTAINS $team")
+    
+    where_clause = ""
+    if where_conditions:
+        where_clause = "WHERE " + " AND ".join(where_conditions)
+    
+    query = f"""{match_clause}
+{where_clause}
+WITH pass.player_name as passer, pass.pass_recipient_name as recipient, COUNT(pass) as pass_count
+RETURN passer, recipient, pass_count
+ORDER BY pass_count DESC
+LIMIT {limit}"""
+    
+    try:
+        results = db.query(query, params)
+        
+        if not results:
+            return ToolResult(success=False, error="No passing partnerships found")
+        
+        passing_data = [
+            {
+                "passer": r["passer"],
+                "recipient": r["recipient"],
+                "passes": r["pass_count"],
+            }
+            for r in results
+        ]
+        
+        return ToolResult(success=True, data=passing_data, raw_query=query)
+    
+    except Exception as e:
+        return ToolResult(success=False, error=str(e), raw_query=query)
+
+
+def get_team_stats(
+    db: Neo4jClient,
+    metric: str = "all",
+    minute_min: Optional[int] = None,
+    minute_max: Optional[int] = None,
+) -> ToolResult:
+    """Get aggregated team statistics: possession, pass completion, shots, etc.
+    
+    Use for: comparing teams, understanding overall match balance.
+    Returns high-level stats for all teams (or filtered to a time window).
+    
+    Parameters:
+    - metric: "all", "possession", "passes", "shots", "tackles"  (default: "all")
+    - minute_min: start of time window  (optional)
+    - minute_max: end of time window (optional)
+    
+    Returns:
+    - Team-level aggregates: team name, metric value, counts
+    
+    Example queries:
+    "Possession stats" → get_team_stats(metric="possession")
+    "Who took more shots in first half?" → get_team_stats(metric="shots", minute_min=0, minute_max=45)
+    "Overall match statistics" → get_team_stats()
+    """
+    time_filter = ""
+    params = {}
+    
+    # Time window filtering
+    if minute_min is not None or minute_max is not None:
+        conditions = []
+        if minute_min is not None:
+            conditions.append(f"event.minute >= {minute_min}")
+        if minute_max is not None:
+            conditions.append(f"event.minute <= {minute_max}")
+        time_filter = " AND ".join(conditions)
+        if time_filter:
+            time_filter = f"WHERE {time_filter}\n"
+    
+    # Build metric-specific queries
+    if metric == "possession" or metric == "all":
+        pass_query = f"""
+        MATCH (pass:Event)
+        WHERE pass.type = 'Pass'
+        {time_filter}
+        WITH pass.team_name as team, COUNT(pass) as pass_count
+        RETURN team, 'pass_count' as metric, pass_count as value
+        ORDER BY pass_count DESC
+        """
+    elif metric == "shots":
+        pass_query = f"""
+        MATCH (shot:Event)
+        WHERE shot.type = 'Shot'
+        {time_filter}
+        WITH shot.team_name as team, COUNT(shot) as shot_count
+        RETURN team, 'shots' as metric, shot_count as value
+        ORDER BY shot_count DESC
+        """
+    elif metric == "tackles":
+        pass_query = f"""
+        MATCH (tackle:Event)
+        WHERE tackle.type = 'Tackle'
+        {time_filter}
+        WITH tackle.team_name as team, COUNT(tackle) as tackle_count
+        RETURN team, 'tackles' as metric, tackle_count as value
+        ORDER BY tackle_count DESC
+        """
+    else:
+        pass_query = f"""
+        MATCH (pass:Event)
+        WHERE pass.type = 'Pass'
+        {time_filter}
+        WITH pass.team_name as team, COUNT(pass) as pass_count
+        RETURN team, 'pass_count' as metric, pass_count as value
+        ORDER BY pass_count DESC
+        """
+    
+    try:
+        results = db.query(pass_query, params)
+        
+        if not results:
+            return ToolResult(success=False, error=f"No {metric} statistics found")
+        
+        stats_data = [
+            {
+                "team": r["team"],
+                "metric": r["metric"],
+                "value": r["value"],
+            }
+            for r in results
+        ]
+        
+        return ToolResult(success=True, data=stats_data, raw_query=pass_query)
+    
+    except Exception as e:
+        return ToolResult(success=False, error=str(e), raw_query=pass_query)
 
 
 def get_team_formation(
@@ -249,9 +669,8 @@ def get_team_formation(
     query = """
     MATCH (m:Match)
     MATCH (m)<-[:IN_MATCH]-(t:Team {id: $team_id})
-    OPTIONAL MATCH (xi:Event {type: "Starting XI"})-[:IN_MATCH]->(m)
-    WHERE xi.team_id = $team_id
-    RETURN t.name as team_name, xi.formation as formation
+    OPTIONAL MATCH (xi:Event {type: "Starting XI", team_id: $team_id})-[:IN_MATCH]->(m)
+    RETURN t.name as team_name, xi.play_pattern as formation
     LIMIT 1
     """
     
@@ -280,404 +699,180 @@ def get_team_formation(
 
 def get_pressing_intensity(
     db: Neo4jClient,
-    period: int,
-    team_id: Optional[str] = None,
+    period: Optional[int] = None,
+    minute_min: Optional[int] = None,
+    minute_max: Optional[int] = None,
+    team: Optional[str] = None,
+    limit: int = 10,
 ) -> ToolResult:
-    """Analyze pressing events by team and player during a period.
+    """Analyze pressing events. DEPRECATED - use get_player_actions(event_type="Pressure") instead.
     
-    Use this tool when:
-    - User asks about defensive intensity, pressing, aggression in a specific half
-    - Want to understand which team pressed more
-    - Analyzing defensive strategies
+    For backward compatibility, converts period to minute ranges:
+    - period 1 = minute_min=0, minute_max=45
+    - period 2 = minute_min=45, minute_max=90
     
-    Parameters:
-    - period: REQUIRED (1 or 2) - which half to analyze
-    - team_id: optional - filter to one team's perspective
-    
-    Returns:
-    - Subgraph: Pressure events per team, limited to top 10 most active pressers
-    - For each: player name, team name, pressure count
-    - Includes only players with 2+ pressure events (removes noise)
-    
-    Example questions this answers:
-    "How aggressive was the defense in the first half?"
-    "Which team pressed more in period 2?"
+    But it's better to use: get_player_actions(event_type="Pressure", minute_min=X, minute_max=Y)
     """
-    if team_id:
-        query = f"""
-        MATCH (pressure:Pressure {{period: $period}})
-        MATCH (pressure)-[:BY]->(p:Player)
-        MATCH (p)-[:PLAYS_FOR]->(t:Team {{id: '{team_id}'}})
-        WITH t.name as team, p.name as player, COUNT(pressure) as count
-        WHERE count >= 2
-        RETURN team, player, count
-        ORDER BY team, count DESC
-        LIMIT 10
-        """
-    else:
-        query = """
-        MATCH (pressure:Pressure {period: $period})
-        MATCH (pressure)-[:BY]->(p:Player)
-        MATCH (p)-[:PLAYS_FOR]->(t:Team)
-        WITH t.name as team, p.name as player, COUNT(pressure) as count
-        WHERE count >= 2
-        RETURN team, player, count
-        ORDER BY team, count DESC
-        LIMIT 10
-        """
+    # Convert period to minute ranges for backward compatibility
+    if period == 1:
+        minute_min, minute_max = 0, 45
+    elif period == 2:
+        minute_min, minute_max = 45, 90
     
-    try:
-        results = db.query(query, {"period": period})
-        
-        if not results:
-            return ToolResult(success=False, error="No significant pressure events found in this period")
-        
-        pressure_data = [
-            {
-                "team": r["team"],
-                "player": r["player"],
-                "pressure_events": r["count"],
-            }
-            for r in results
-        ]
-        
-        return ToolResult(success=True, data=pressure_data, raw_query=query)
-    
-    except Exception as e:
-        return ToolResult(success=False, error=str(e), raw_query=query)
+    return get_player_actions(
+        db,
+        event_type="Pressure",
+        team=team,
+        minute_min=minute_min,
+        minute_max=minute_max,
+        limit=limit
+    )
 
 
 def get_possession_stats(
     db: Neo4jClient,
     period: Optional[int] = None,
+    minute_min: Optional[int] = None,
+    minute_max: Optional[int] = None,
 ) -> ToolResult:
-    """Get raw pass counts by team (subgraph data).
+    """Get team possession statistics. DEPRECATED - use get_team_stats(metric="possession", minute_min=X, minute_max=Y) instead.
     
-    Use this tool when:
-    - User asks about possession or ball control
-    - You need to understand which team played more passes
-    - Analyzing possession patterns in first vs second half
+    For backward compatibility, converts period to minute ranges:
+    - period 1 = minute_min=0, minute_max=45
+    - period 2 = minute_min=45, minute_max=90
     
-    Returns:
-    - Subgraph: Complete pass counts for each team
-    - Includes: team name and total passes
-    - Agent can compute percentages from raw counts
-    
-    Example questions this answers:
-    "Who had more possession?"
-    "Did possession change in the second half?"
-    "Which team controlled the ball more?"
+    Better to use: get_team_stats(metric="possession", minute_min=0, minute_max=45)
     """
-    if period:
-        period_filter = f"WHERE e.period = {period}"
-    else:
-        period_filter = ""
+    # Convert period to minute ranges for backward compatibility
+    if period == 1:
+        minute_min, minute_max = 0, 45
+    elif period == 2:
+        minute_min, minute_max = 45, 90
     
-    query = f"""
-    MATCH (e:Pass)
-    {period_filter}
-    MATCH (e)-[:BY]->(p:Player)
-    MATCH (p)-[:PLAYS_FOR]->(t:Team)
-    WITH t.name as team_name, COUNT(e) as pass_count
-    RETURN team_name, pass_count
-    ORDER BY team_name
-    """
-    
-    try:
-        results = db.query(query)
-        
-        if not results:
-            return ToolResult(success=False, error="No pass data found")
-        
-        possession_data = [
-            {
-                "team": r["team_name"],
-                "passes": r["pass_count"],
-            }
-            for r in results
-        ]
-        
-        return ToolResult(success=True, data=possession_data, raw_query=query)
-    
-    except Exception as e:
-        return ToolResult(success=False, error=str(e), raw_query=query)
+    return get_team_stats(db, metric="possession", minute_min=minute_min, minute_max=minute_max)
 
 
 def get_attacking_patterns(
     db: Neo4jClient,
     period: Optional[int] = None,
+    minute_min: Optional[int] = None,
+    minute_max: Optional[int] = None,
 ) -> ToolResult:
-    """Analyze shots and scoring by team (aggregated).
-    
-    Use this tool when:
-    - User asks about attacking strategies, shots, goals, efficiency
-    - Understanding offensive output and shooting
-    - Comparing attacking performance between periods
-    
-    Parameters:
-    - period: optional (1 or 2) - restrict to one half. If not provided, analyzes entire match.
-    
-    Returns:
-    - Subgraph: Aggregated shot stats per team
-    - Includes: team, total shots, goals, and list of goal scorers with minutes
-    
-    Example questions this answers:
-    "How many shots did they have?"
-    "Who scored?"
-    "How efficient was their finishing?"
-    """
-    if period:
-        query = f"""
-        MATCH (shot:Shot)
-        WHERE shot.period = {period}
-        MATCH (shot)-[:BY]->(p:Player)
-        MATCH (p)-[:PLAYS_FOR]->(t:Team)
-        WITH 
-            t.name as team,
-            COUNT(shot) as total_shots,
-            COUNT(CASE WHEN shot.outcome = 'Goal' THEN 1 END) as goals,
-            COLLECT(CASE WHEN shot.outcome = 'Goal' THEN p.name + ' (' + shot.minute + ')' END) as scorers
-        RETURN team, total_shots, goals, [s IN scorers WHERE s IS NOT NULL] as goal_list
-        ORDER BY team
-        """
-    else:
-        query = """
-        MATCH (shot:Shot)
-        MATCH (shot)-[:BY]->(p:Player)
-        MATCH (p)-[:PLAYS_FOR]->(t:Team)
-        WITH 
-            t.name as team,
-            COUNT(shot) as total_shots,
-            COUNT(CASE WHEN shot.outcome = 'Goal' THEN 1 END) as goals,
-            COLLECT(CASE WHEN shot.outcome = 'Goal' THEN p.name + ' (' + shot.minute + ')' END) as scorers
-        RETURN team, total_shots, goals, [s IN scorers WHERE s IS NOT NULL] as goal_list
-        ORDER BY team
-        """
-    
-    try:
-        results = db.query(query)
-        
-        if not results:
-            return ToolResult(success=False, error="No shot data found")
-        
-        shots_data = [
-            {
-                "team": r["team"],
-                "shots": r["total_shots"],
-                "goals": r["goals"],
-                "scorers": r["goal_list"] if r["goal_list"] else [],
-            }
-            for r in results
-        ]
-        
-        return ToolResult(success=True, data=shots_data, raw_query=query)
-    
-    except Exception as e:
-        return ToolResult(success=False, error=str(e), raw_query=query)
+    """Analyze shots. DEPRECATED - use find_events(event_type='Shot', minute_min=X, minute_max=Y) instead.
+    Backward compatible: period 1 = 0-45 minutes, period 2 = 45-90 minutes."""
+    if period == 1:
+        minute_min, minute_max = 0, 45
+    elif period == 2:
+        minute_min, minute_max = 45, 90
+    return find_events(db, event_type="Shot", minute_min=minute_min, minute_max=minute_max)
 
 
 def analyze_transitions(
     db: Neo4jClient,
     period: Optional[int] = None,
+    minute_min: Optional[int] = None,
+    minute_max: Optional[int] = None,
 ) -> ToolResult:
-    """Analyze ball recovery events (transitions) by team.
-    
-    Use this tool when:
-    - User asks about transition play, counter-attacks, tempo
-    - Understanding how teams switch from defense to attack
-    - Want to know which team transitions more
-    
-    Parameters:
-    - period: optional (1 or 2) - restrict to one half. If not provided, analyzes both.
-    
-    Returns:
-    - Subgraph: Top 5 most-involved players in transitions per team
-    - Includes: team, player, recovery count
-    - Ranked by number of recovery events
-    
-    Example questions this answers:
-    "How good were they on the counter?"
-    "Which team transitioned faster/more?"
-    "Who won the ball most often?"
-    """
-    if period:
-        query = f"""
-        MATCH (recovery:Interception|BallRecovery)
-        WHERE recovery.period = {period}
-        MATCH (recovery)-[:BY]->(p:Player)
-        MATCH (p)-[:PLAYS_FOR]->(t:Team)
-        WITH t.name as team, p.name as player, COUNT(recovery) as count
-        RETURN team, player, count
-        ORDER BY team, count DESC
-        LIMIT 10
-        """
-    else:
-        query = """
-        MATCH (recovery:Interception|BallRecovery)
-        MATCH (recovery)-[:BY]->(p:Player)
-        MATCH (p)-[:PLAYS_FOR]->(t:Team)
-        WITH t.name as team, p.name as player, COUNT(recovery) as count
-        RETURN team, player, count
-        ORDER BY team, count DESC
-        LIMIT 10
-        """
-    
-    try:
-        results = db.query(query)
-        
-        if not results:
-            return ToolResult(success=False, error="No recovery events found")
-        
-        transition_data = [
-            {
-                "team": r["team"],
-                "player": r["player"],
-                "recoveries": r["count"],
-            }
-            for r in results
-        ]
-        
-        return ToolResult(success=True, data=transition_data, raw_query=query)
-    
-    except Exception as e:
-        return ToolResult(success=False, error=str(e), raw_query=query)
+    """Analyze transitions. DEPRECATED - use get_player_actions(event_type='BallRecovery', minute_min=X) instead.
+    Backward compatible: period 1 = 0-45 minutes, period 2 = 45-90 minutes."""
+    if period == 1:
+        minute_min, minute_max = 0, 45
+    elif period == 2:
+        minute_min, minute_max = 45, 90
+    return get_player_actions(db, event_type="BallRecovery", minute_min=minute_min, minute_max=minute_max)
 
 
 def get_pass_network(
     db: Neo4jClient,
-    team_id: Optional[str] = None,
+    team: Optional[str] = None,
+    period: Optional[int] = None,
 ) -> ToolResult:
-    """Analyze passing partnerships between players (top connections).
-    
-    Use this tool when:
-    - User asks about who passed to whom most, key partnerships
-    - Understanding playmaking chains and connections
-    - Identifying dominant passing relationships
-    
-    Parameters:
-    - team_id: optional - filter to one team's passing network. If not provided, shows all teams' top partnerships.
-    
-    Returns:
-    - Subgraph: Top 10 passing partnerships (passer → recipient)
-    - Includes: from_player, to_player, team, pass count
-    - Ranked by frequency
-    
-    Example questions this answers:
-    "Who were the key passers?"
-    "Which players connected the most?"
-    "What was the passing structure?"
-    """
-    if team_id:
-        query = f"""
-        MATCH (pass:Pass)-[:BY]->(p1:Player)-[:PLAYS_FOR]->(t:Team {{id: '{team_id}'}})
-        MATCH (pass)-[:TO_PLAYER]->(p2:Player)
-        WITH 
-            p1.name as passer,
-            p2.name as recipient,
-            t.name as team,
-            COUNT(pass) as passes
-        RETURN passer, recipient, team, passes
-        ORDER BY passes DESC
-        LIMIT 10
-        """
-    else:
-        query = """
-        MATCH (pass:Pass)-[:BY]->(p1:Player)-[:PLAYS_FOR]->(t:Team)
-        MATCH (pass)-[:TO_PLAYER]->(p2:Player)
-        WITH 
-            p1.name as passer,
-            p2.name as recipient,
-            t.name as team,
-            COUNT(pass) as passes
-        RETURN passer, recipient, team, passes
-        ORDER BY passes DESC
-        LIMIT 10
-        """
-    
-    try:
-        results = db.query(query)
-        
-        if not results:
-            return ToolResult(success=False, error="No passing data found")
-        
-        partnerships = [
-            {
-                "from": r["passer"],
-                "to": r["recipient"],
-                "team": r["team"],
-                "passes": r["passes"],
-            }
-            for r in results
-        ]
-        
-        return ToolResult(success=True, data=partnerships, raw_query=query)
-    
-    except Exception as e:
-        return ToolResult(success=False, error=str(e), raw_query=query)
+    """Analyze passing partnerships. DEPRECATED - use get_passing_pairs(team=X, minute_min=Y) instead.
+    Backward compatible: period 1 = 0-45 minutes, period 2 = 45-90 minutes."""
+    minute_min, minute_max = None, None
+    if period == 1:
+        minute_min, minute_max = 0, 45
+    elif period == 2:
+        minute_min, minute_max = 45, 90
+    return get_passing_pairs(db, team=team, minute_min=minute_min, minute_max=minute_max)
 
 
 def analyze_defensive_organization(
     db: Neo4jClient,
     period: Optional[int] = None,
+    minute_min: Optional[int] = None,
+    minute_max: Optional[int] = None,
 ) -> ToolResult:
-    """Analyze which players were most active defensively.
+    """Analyze defensive actions. DEPRECATED - use get_player_actions(event_type='Tackle', minute_min=X) instead.
+    Backward compatible: period 1 = 0-45 minutes, period 2 = 45-90 minutes."""
+    if period == 1:
+        minute_min, minute_max = 0, 45
+    elif period == 2:
+        minute_min, minute_max = 45, 90
+    return get_player_actions(db, event_type="Tackle", minute_min=minute_min, minute_max=minute_max)
+
+
+def get_match_players(
+    db: Neo4jClient,
+    team: Optional[str] = None,
+) -> ToolResult:
+    """Get list of all players in the match, optionally filtered by team.
     
     Use this tool when:
-    - User asks about defensive organization, structure, or key defenders
-    - Want to know who made the most tackles/interceptions
-    - Comparing defensive activity between periods
+    - User asks "who played?" or "show me all players"
+    - You need to verify exact player names before using other tools
+    - A player name query returned no results and you want to see available options
+    - Confirming correct spelling of a player name
     
     Parameters:
-    - period: optional (1 or 2) - restrict to one half. If not provided, analyzes both.
+    - team: optional team name filter (e.g., "Real Madrid") - if omitted, returns all players
     
     Returns:
-    - Subgraph: Top 10 most-active defenders per team (aggregated)
-    - Includes: team, player, count of their defensive actions (tackles/duels/interceptions)
-    - Ranked by defensive action count
+    - List of all players: player name, team, shirt number
+    - Sorted by team then by player name
+    - Use this to find exact spellings if fuzzy matching didn't find what you wanted
     
-    Example questions this answers:
-    "Who was the best defender?"
-    "How did the defense organize?"
-    "Who made key defensive plays?"
+    Example queries:
+    "Get all players" → get_match_players()
+    "Show Real Madrid's squad" → get_match_players(team="Real Madrid")
+    "Who are the attacking players?" → Call this first to see names, then ask more specific questions
     """
-    if period:
-        query = f"""
-        MATCH (event:Tackle|Duel|Interception)
-        WHERE event.period = {period}
-        MATCH (event)-[:BY]->(p:Player)
-        MATCH (p)-[:PLAYS_FOR]->(t:Team)
-        WITH t.name as team, p.name as player, COUNT(event) as action_count
-        RETURN team, player, action_count
-        ORDER BY team, action_count DESC
-        LIMIT 10
-        """
-    else:
-        query = """
-        MATCH (event:Tackle|Duel|Interception)
-        MATCH (event)-[:BY]->(p:Player)
-        MATCH (p)-[:PLAYS_FOR]->(t:Team)
-        WITH t.name as team, p.name as player, COUNT(event) as action_count
-        RETURN team, player, action_count
-        ORDER BY team, action_count DESC
-        LIMIT 10
-        """
+    where_clause = ""
+    params = {}
+    
+    if team:
+        params["team"] = team.lower()
+        where_clause = "WHERE LOWER(t.name) CONTAINS $team"
+    
+    query = f"""MATCH (p:Player)-[:PLAYS_FOR]->(t:Team)
+{where_clause}
+RETURN 
+    p.name as player_name,
+    t.name as team,
+    p.shirt_number as shirt_number
+ORDER BY t.name ASC, p.name ASC"""
     
     try:
-        results = db.query(query)
+        results = db.query(query, params)
         
         if not results:
-            return ToolResult(success=False, error="No defensive events found")
+            team_filter = f" for {team}" if team else ""
+            return ToolResult(success=False, error=f"No players found{team_filter}")
         
-        defensive_data = [
+        players = [
             {
+                "player": r["player_name"],
                 "team": r["team"],
-                "player": r["player"],
-                "defensive_actions": r["action_count"],
+                "shirt_number": r["shirt_number"] or "N/A",
             }
             for r in results
         ]
         
-        return ToolResult(success=True, data=defensive_data, raw_query=query)
+        return ToolResult(
+            success=True,
+            data=players,
+            raw_query=query
+        )
     
     except Exception as e:
         return ToolResult(success=False, error=str(e), raw_query=query)

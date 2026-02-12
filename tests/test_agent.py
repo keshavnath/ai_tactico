@@ -1,5 +1,4 @@
 """Test script for tactical agent end-to-end."""
-import os
 import sys
 import time
 from pathlib import Path
@@ -7,15 +6,9 @@ from pathlib import Path
 # Add project root to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.config import config
 from src.db import Neo4jClient
 from src.agent import create_agent
-
-# Configuration from env
-NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434")
-LLM_MODEL = os.getenv("LLM_MODEL", "qwen3:1.7b")
 
 
 def check_neo4j(client: Neo4jClient) -> bool:
@@ -30,15 +23,17 @@ def check_neo4j(client: Neo4jClient) -> bool:
         return False
 
 
-def check_ollama(llm_client) -> bool:
-    """Verify Ollama service is running and model is available."""
+def check_llm_service(llm_client) -> bool:
+    """Verify LLM service is running and responding."""
     if llm_client.health_check():
-        print(f"[OK] Ollama running with model '{LLM_MODEL}'")
+        print(f"[OK] LLM service responding with model '{config.LLM_MODEL}'")
         return True
     else:
-        print(f"[FAIL] Ollama not responding OR model '{LLM_MODEL}' not available")
-        print(f"       1. Start Ollama: ollama serve")
-        print(f"       2. In another terminal, pull model: ollama pull {LLM_MODEL}")
+        print(f"[FAIL] LLM service not responding (model: {config.LLM_MODEL})")
+        print(f"       Verify:")
+        print(f"       - Service is running at {config.LLM_BASE_URL}")
+        print(f"       - Model '{config.LLM_MODEL}' is available")
+        print(f"       - API key is correct (if required)")
         return False
 
 
@@ -49,10 +44,14 @@ def main():
     print("=" * 60)
     print()
     
+    # Display configuration
+    config.display()
+    print()
+    
     # Initialize connections
     print("Initializing...")
     try:
-        db = Neo4jClient(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
+        db = Neo4jClient(config.NEO4J_URI, config.NEO4J_USER, config.NEO4J_PASSWORD)
     except Exception as e:
         print(f"[FAIL] Failed to create Neo4j client: {e}")
         return 1
@@ -66,26 +65,35 @@ def main():
     # Create agent
     print("\n2. Creating agent...")
     try:
-        agent = create_agent(db, llm_base_url=LLM_BASE_URL, llm_model=LLM_MODEL)
+        agent = create_agent(
+            db,
+            llm_base_url=config.LLM_BASE_URL,
+            llm_model=config.LLM_MODEL,
+            llm_api_key=config.LLM_API_KEY,
+            max_iterations=config.AGENT_MAX_ITERATIONS,
+        )
         print("[OK] Agent created")
     except Exception as e:
         print(f"[FAIL] Agent creation failed: {e}")
         db.close()
         return 1
     
-    # Check LLM
-    print("\n3. Checking Ollama service...")
-    if not check_ollama(agent.llm):
+    # Check LLM service
+    print("\n3. Checking LLM service...")
+    if not check_llm_service(agent.llm):
         db.close()
         return 1
     
-    # Test with sample question
-    print("\n4. Running sample analysis...")
+    # Test with sample questions - now with time-bounded and specific queries
+    print("\n4. Running sample analysis with event-centric and time-bounded queries...")
     print("-" * 60)
     
     questions = [
-        "Who scored in the match?",
-        "How aggressive was the defense?",
+        "Explain the buildup to the first goal",
+        "Who pressed the most in the first 20 minutes?",
+        "Show me Benzema's shots in the match",
+        "Which players passed to each other the most in the second half?",
+        "How many tackles happened minute 30-45?",
     ]
     
     test_passed = True

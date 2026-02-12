@@ -1,6 +1,6 @@
 """Flask web app for AI Tactico - minimal frontend for agent interaction."""
-import os
 from flask import Flask, render_template, request, jsonify
+from src.config import config
 from src.agent import create_agent
 from src.db import Neo4jClient
 
@@ -13,13 +13,25 @@ def create_app():
         static_folder="src/frontend/static"
     )
     
-    # Initialize database and agent
+    # Validate configuration
+    if not config.validate():
+        raise RuntimeError("Configuration validation failed. Check your .env file and environment variables.")
+    
+    # Initialize database
     db = Neo4jClient(
-        uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
-        user=os.getenv("NEO4J_USER", "neo4j"),
-        password=os.getenv("NEO4J_PASSWORD", "password"),
+        uri=config.NEO4J_URI,
+        user=config.NEO4J_USER,
+        password=config.NEO4J_PASSWORD,
     )
-    agent = create_agent(db)
+    
+    # Initialize agent with configuration
+    agent = create_agent(
+        db,
+        llm_base_url=config.LLM_BASE_URL,
+        llm_model=config.LLM_MODEL,
+        llm_api_key=config.LLM_API_KEY,
+        max_iterations=config.AGENT_MAX_ITERATIONS,
+    )
     
     # Load match info
     def get_match_info():
@@ -88,9 +100,10 @@ def create_app():
 
 def main():
     """Run the Flask development server."""
+    print()
+    
     app = create_app()
-    port = int(os.getenv("PORT", 5000))
-    app.run(debug=True, host="0.0.0.0", port=port)
+    app.run(debug=config.DEBUG, host="0.0.0.0", port=config.PORT)
 
 
 if __name__ == "__main__":

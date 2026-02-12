@@ -33,9 +33,9 @@ def main():
         help="Unique identifier for this match",
     )
     parser.add_argument(
-        "--clear",
+        "--overwrite",
         action="store_true",
-        help="Clear existing data before loading",
+        help="Clear existing data and indexes before loading (full rebuild)",
     )
 
     args = parser.parse_args()
@@ -43,9 +43,43 @@ def main():
     client = Neo4jClient(args.uri, args.user, args.password)
 
     try:
-        if args.clear:
-            print("Clearing existing data...")
+        if args.overwrite:
+            print("Clearing existing data and constraints...")
+            
+            # Drop all indexes first
+            try:
+                indexes = client.query("SHOW INDEXES")
+                for idx in indexes:
+                    # Try different field name variations across Neo4j versions
+                    idx_name = idx.get("name") or idx.get("indexName") or idx.get("Index name")
+                    if idx_name and not idx_name.startswith("__"):  # Skip system indexes
+                        try:
+                            client.execute(f"DROP INDEX `{idx_name}` IF EXISTS")
+                            print(f"  Dropped index: {idx_name}")
+                        except Exception as e:
+                            print(f"  Note: Could not drop index {idx_name}: {str(e)[:80]}")
+            except Exception as e:
+                print(f"  Note: Could not query indexes: {str(e)[:80]}")
+            
+            # Drop all constraints
+            try:
+                constraints = client.query("SHOW CONSTRAINTS")
+                for const in constraints:
+                    # Try different field name variations across Neo4j versions
+                    const_name = const.get("name") or const.get("constraintName") or const.get("Constraint name")
+                    if const_name and not const_name.startswith("__"):  # Skip system constraints
+                        try:
+                            client.execute(f"DROP CONSTRAINT `{const_name}` IF EXISTS")
+                            print(f"  Dropped constraint: {const_name}")
+                        except Exception as e:
+                            print(f"  Note: Could not drop constraint {const_name}: {str(e)[:80]}")
+            except Exception as e:
+                print(f"  Note: Could not query constraints: {str(e)[:80]}")
+            
+            # Clear all data
+            print("Deleting all nodes and relationships...")
             client.execute("MATCH (n) DETACH DELETE n")
+            print("Clear complete. Setting up fresh schema...")
 
         print("Setting up schema...")
         setup_schema(client)
@@ -58,7 +92,6 @@ def main():
 
     finally:
         client.close()
-
 
 if __name__ == "__main__":
     main()
