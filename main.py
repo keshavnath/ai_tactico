@@ -42,7 +42,6 @@ def create_app():
             MATCH (m)<-[:IN_MATCH]-(team:Team)
             RETURN 
                 m.id as match_id,
-                m.match_date as match_date,
                 COLLECT(DISTINCT team.name) as teams,
                 COUNT(DISTINCT e) as event_count
             LIMIT 1

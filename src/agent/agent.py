@@ -38,21 +38,21 @@ class TacticalAgent:
         workflow.add_edge("think", "act")
         workflow.add_conditional_edges(
             "act",
-            self._should_continue,
+            self._should_continue_from_act,
             {
                 "reflect": "reflect",
                 "think": "think",
                 "end": END,
             }
         )
-        # After reflect, check if we should continue
+        # After reflect, determine if we have complete data or need more
         workflow.add_conditional_edges(
             "reflect",
-            self._should_continue,
+            self._should_continue_from_reflect,
             {
-                "think": "think",     # Continue to thinking step if missing data
-                "reflect": "reflect", # Loop back to reflect (shouldn't happen)
-                "end": END,           # Or stop if final answer is ready
+                "think": "think",     # Need more data, continue thinking
+                "answer": "answer",   # Have complete data, generate answer
+                "end": END,           # Error case, stop
             }
         )
         workflow.add_edge("answer", END)
@@ -92,119 +92,101 @@ class TacticalAgent:
         """Action step: execute a tool based on reasoning."""
         last_thought = state.thoughts[-1] if state.thoughts else ""
         
-        # Check for multiple Actions in one output (violation of format)
-        action_count = len(re.findall(r"Action:\s*\w+", last_thought, re.IGNORECASE))
-        if action_count > 1:
-            print(f"[ACT] WARNING: Found {action_count} actions in one response (should be 1)")
-            print(f"[ACT] Model is not following format. Only using first action.")
-        
-        # Parse tool call from LLM thought - only get FIRST action
-        action_match = re.search(r"Action:\s*(\w+)", last_thought, re.IGNORECASE)
-        
-        if not action_match:
-            state.parse_failures += 1
-            print("[ACT] ERROR: No 'Action:' found in response")
-            print("[ACT] Expected format: Action: [tool_name]")
-            # print(f"[ACT] Received: {last_thought[:150]}...")
-            print(f"[ACT] Received: {last_thought}")
-            print(f"[ACT] Parse failures: {state.parse_failures}/3")
-            
-            if state.parse_failures >= 3:
-                print("[ACT] STOPPING: Too many parse failures. Model not following format.")
-                state.final_answer = "I encountered an issue processing your question. Please rephrase or try a simpler question."
+        # Try to parse JSON from response
+        try:
+            # Extract JSON object from response (handle cases where LLM adds extra text)
+            json_match = re.search(r'\{.*\}', last_thought, re.DOTALL)
+            if not json_match:
+                state.parse_failures += 1
+                print("[ACT] ERROR: No JSON found in response")
+                print(f"[ACT] Expected JSON with 'action' and 'parameters' fields")
+                print(f"[ACT] Got: {last_thought[:200]}")
+                print(f"[ACT] Parse failures: {state.parse_failures}/3")
+                
+                if state.parse_failures >= 3:
+                    print("[ACT] STOPPING: Too many parse failures. Model not outputting valid JSON.")
+                    state.final_answer = "I encountered an issue processing your question. Model could not produce JSON-formatted responses after 3 attempts."
+                    return state
+                
                 return state
             
+            json_str = json_match.group(0)
+            action_data = json.loads(json_str)
+            
+            # Validate required fields
+            if "action" not in action_data:
+                state.parse_failures += 1
+                print("[ACT] ERROR: Missing 'action' field in JSON")
+                print(f"[ACT] Got: {action_data}")
+                print(f"[ACT] Parse failures: {state.parse_failures}/3")
+                
+                if state.parse_failures >= 3:
+                    print("[ACT] STOPPING: Too many parse failures.")
+                    state.final_answer = "I encountered an issue with action parsing."
+                    return state
+                
+                return state
+            
+            if "parameters" not in action_data:
+                state.parse_failures += 1
+                print("[ACT] ERROR: Missing 'parameters' field in JSON")
+                print(f"[ACT] Got: {action_data}")
+                print(f"[ACT] Parse failures: {state.parse_failures}/3")
+                
+                if state.parse_failures >= 3:
+                    print("[ACT] STOPPING: Too many parse failures.")
+                    state.final_answer = "I encountered an issue with action parsing."
+                    return state
+                
+                return state
+            
+            # Reset parse failures on successful parse
+            state.parse_failures = 0
+            
+            tool_name = action_data["action"]
+            tool_input = action_data["parameters"]
+            
+            # Validate tool exists
+            valid_tools = [t["name"] for t in tools.list_available_tools()]
+            if tool_name not in valid_tools:
+                print(f"[ACT] ERROR: Tool '{tool_name}' not found")
+                print(f"[ACT] Available tools: {', '.join(valid_tools)}")
+                state.parse_failures += 1
+                return state
+            
+            # Execute tool
+            print(f"[ACT] Calling {tool_name}({tool_input})")
+            tool_func = getattr(tools, tool_name, None)
+            
+            try:
+                result = tool_func(self.db, **tool_input)
+                if result.success:
+                    data_preview = str(result.data)
+                    print(f"[ACT] Success: {data_preview}")
+                else:
+                    print(f"[ACT] Tool error: {result.error}")
+            except Exception as e:
+                result = ToolResult(success=False, error=f"Execution failed: {str(e)}")
+                print(f"[ACT] Execution error: {e}")
+            
+            state.tool_calls.append((tool_name, tool_input))
+            state.tool_results.append(result)
+            
             return state
-        
-        # Find Action Input after the found Action
-        action_pos = action_match.start()
-        remaining_text = last_thought[action_pos:]
-        input_match = re.search(
-            r"Action Input:\s*(\{)",
-            remaining_text,
-            re.IGNORECASE
-        )
-        
-        if not input_match:
+            
+        except json.JSONDecodeError as e:
             state.parse_failures += 1
-            print("[ACT] ERROR: No 'Action Input:' JSON found in response")
-            print("[ACT] Expected format: Action Input: {} or {'param': value}")
+            print("[ACT] ERROR: Invalid JSON in response")
+            print(f"[ACT] Parse error: {str(e)}")
+            print(f"[ACT] Got: {last_thought[:200]}")
             print(f"[ACT] Parse failures: {state.parse_failures}/3")
             
             if state.parse_failures >= 3:
                 print("[ACT] STOPPING: Too many parse failures.")
-                state.final_answer = "I encountered an issue with action parsing. Please try again."
+                state.final_answer = "I encountered an issue with JSON parsing. Please try again."
                 return state
             
             return state
-        
-        # Reset parse failures on successful parse
-        state.parse_failures = 0
-        
-        # Extract JSON by counting braces - find complete JSON object
-        json_start = action_pos + input_match.start(1)  # Position of first '{'
-        brace_count = 0
-        json_end = None
-        
-        for i in range(json_start, len(last_thought)):
-            if last_thought[i] == '{':
-                brace_count += 1
-            elif last_thought[i] == '}':
-                brace_count -= 1
-                if brace_count == 0:
-                    json_end = i + 1
-                    break
-        
-        if json_end is None:
-            print("[ACT] ERROR: Incomplete JSON - mismatched braces")
-            print("[ACT] Got: " + last_thought[json_start:json_start+100])
-            state.parse_failures += 1
-            return state
-        
-        json_str = last_thought[json_start:json_end]
-        tool_name = action_match.group(1)
-        
-        # Validate tool exists
-        valid_tools = [t["name"] for t in tools.list_available_tools()]
-        if tool_name not in valid_tools:
-            print(f"[ACT] ERROR: Tool '{tool_name}' not found")
-            print(f"[ACT] Available tools: {', '.join(valid_tools)}")
-            state.parse_failures += 1
-            return state
-        
-        # Parse JSON input
-        try:
-            tool_input = json.loads(json_str)
-        except json.JSONDecodeError as e:
-            print(f"[ACT] ERROR: Invalid JSON in Action Input")
-            print(f"[ACT] Parse error: {str(e)}")
-            print(f"[ACT] Got: {json_str[:100]}")
-            state.parse_failures += 1
-            return state
-        
-        # Auto-inject period default if missing
-        if tool_name == "get_pressing_intensity" and "period" not in tool_input:
-            tool_input["period"] = 1
-        
-        # Execute tool
-        print(f"[ACT] Calling {tool_name}({tool_input})")
-        tool_func = getattr(tools, tool_name, None)
-        
-        try:
-            result = tool_func(self.db, **tool_input)
-            if result.success:
-                data_preview = str(result.data)#[:100]
-                print(f"[ACT] Success: {data_preview}")
-            else:
-                print(f"[ACT] Tool error: {result.error}")
-        except Exception as e:
-            result = ToolResult(success=False, error=f"Execution failed: {str(e)}")
-            print(f"[ACT] Execution error: {e}")
-        
-        state.tool_calls.append((tool_name, tool_input))
-        state.tool_results.append(result)
-        
-        return state
     
     def _reflect_node(self, state: AgentState) -> AgentState:
         """Reflection step: evaluate results and decide next action."""
@@ -235,96 +217,104 @@ class TacticalAgent:
         
         state.thoughts.append(reflection)
         
-        # Check if we should finalize answer (must match exact pattern at line start)
-        # Parse reflection to find decision: "Final Answer: ..." or "Missing: ..."
-        final_answer_match = re.search(r"^\s*Final Answer:\s*(.*?)\s*$", reflection, re.MULTILINE | re.IGNORECASE)
-        missing_match = re.search(r"^\s*Missing:\s*(.*?)\s*$", reflection, re.MULTILINE | re.IGNORECASE)
-        
-        if final_answer_match:
-            # Only treat as final if "Final Answer:" appears without "Missing:" in same line
-            answer_line = final_answer_match.group(0)
-            if "missing:" not in answer_line.lower():
-                state.final_answer = final_answer_match.group(1).strip()
-                print(f"\n[FINAL] Answer ready")
-        elif missing_match:
-            # Missing data - will continue looping
-            pass
+        # Parse JSON response from reflection
+        try:
+            json_match = re.search(r'\{.*\}', reflection, re.DOTALL)
+            if json_match:
+                reflection_data = json.loads(json_match.group(0))
+                
+                if reflection_data.get("decision") == "complete":
+                    # We have all data needed - ready to answer
+                    state.final_answer = "ready_to_answer"
+                    print(f"\n[FINAL] Answer ready")
+                elif reflection_data.get("decision") == "incomplete":
+                    # Need more data - continue looping (don't set final_answer)
+                    pass
+        except (json.JSONDecodeError, AttributeError):
+            # If JSON parsing fails, try to infer from text
+            print("[REFLECT] Warning: Could not parse JSON, attempting text fallback")
+            if "complete" in reflection.lower():
+                state.final_answer = "ready_to_answer"
+                print(f"\n[FINAL] Answer ready (from text fallback)")
         
         return state
     
     def _answer_node(self, state: AgentState) -> AgentState:
         """Final answer synthesis."""
-        if not state.final_answer:
-            print(f"\n[ANSWER] Synthesizing final response...")
-            
-            # Check if we have any successful tool results
-            successful_results = [r for r in state.tool_results if r.success]
-            failed_results = [r for r in state.tool_results if not r.success]
-            
-            context = ""
-            if successful_results:
-                context = "Information gathered:\n"
-                for result in successful_results:
-                    context += f"- {result.data}\n"
-            elif failed_results:
-                context = "Data unavailable:\n"
-                for result in failed_results:
-                    context += f"- {result.error}\n"
-            else:
-                context = "No tools were successfully executed."
-            
-            synthesis_prompt = get_react_prompt(
-                state.user_question,
-                tools.list_available_tools(),
-                done_reasoning=True,
-            )
-            
-            try:
-                final_analysis = self.llm.generate(
-                    f"{context}\n\n{synthesis_prompt}",
-                    system=FOOTBALL_ANALYST_SYSTEM_PROMPT,
-                )
-                state.final_answer = final_analysis
-                print(f"{final_analysis}")
-            except Exception as e:
-                print(f"[ANSWER] ERROR synthesizing answer: {e}")
-                state.final_answer = f"Unable to synthesize answer: {str(e)}"
+        # Generate final answer based on tool results
+        print(f"\n[ANSWER] Generating final answer...")
+        
+        # Check if we have any successful tool results
+        successful_results = [r for r in state.tool_results if r.success]
+        
+        if successful_results:
+            context = "Information gathered:\n"
+            for result in successful_results:
+                context += f"- {result.data}\n"
         else:
-            # Final answer was set earlier (e.g., due to parsing errors or reflection)
-            print(f"\n[FINAL] Answer ready")
-            print(f"{state.final_answer}")
+            context = "No data was successfully retrieved."
+        
+        # Use a simple generation prompt for final answer
+        answer_prompt = f"""Based on this data, provide a brief answer (1-3 sentences) to the question.
+
+Question: {state.user_question}
+
+Data: {context}
+
+Answer:"""
+        
+        try:
+            final_answer = self.llm.generate(
+                answer_prompt,
+                system=FOOTBALL_ANALYST_SYSTEM_PROMPT,
+            )
+            state.final_answer = final_answer.strip()
+            print(f"{final_answer}")
+        except Exception as e:
+            print(f"[ANSWER] ERROR generating answer: {e}")
+            state.final_answer = f"Unable to generate answer: {str(e)}"
         
         return state
     
-    def _should_continue(self, state: AgentState) -> str:
-        """Decide if we should continue reasoning or finalize answer."""
+    def _should_continue_from_act(self, state: AgentState) -> str:
+        """Decide routing after act node."""
         # Hard limit on iterations
         if len(state.tool_calls) >= self.max_iterations:
             print(f"\n[STOP] Max iterations ({self.max_iterations}) reached")
             return "end"
         
-        # If we have a final answer, stop
-        if state.final_answer:
-            return "end"
+        # If tool executed successfully and we have results, go to reflect
+        if len(state.tool_results) > 0 and len(state.tool_results) >= len(state.tool_calls):
+            return "reflect"
         
-        # Check last thought
+        # If no results (parsing error or tool failed), try thinking again
+        return "think"
+    
+    def _should_continue_from_reflect(self, state: AgentState) -> str:
+        """Decide routing after reflect node - check if we have complete data or need more."""
+        # Check if final_answer was set (means reflection decided "complete")
+        if state.final_answer == "ready_to_answer":
+            return "answer"
+        
+        # Check last reflection thought for decision
         last_thought = state.thoughts[-1] if state.thoughts else ""
         
-        # If LLM explicitly said "Final Answer:", stop
-        if "Final Answer:" in last_thought:
-            return "end"
+        try:
+            json_match = re.search(r'\{.*\}', last_thought, re.DOTALL)
+            if json_match:
+                reflection_data = json.loads(json_match.group(0))
+                if reflection_data.get("decision") == "complete":
+                    return "answer"
+                elif reflection_data.get("decision") == "incomplete":
+                    return "think"  # Need more data, think about next tool
+        except (json.JSONDecodeError, AttributeError):
+            pass
         
-        # If LLM said "Missing:" data, continue to thinking/acting to find that data
-        if "Missing:" in last_thought and len(state.tool_calls) > 0:
+        # Default: if we can't parse, assume need more data
+        if len(state.tool_calls) < self.max_iterations:
             return "think"
-        
-        # If we just tried a tool and got results after a reflection, synthesize answer
-        if len(state.tool_results) > len(state.tool_calls):
-            # This shouldn't happen, but if it does, go to answer
+        else:
             return "end"
-        
-        # Default: go to reflection step
-        return "reflect"
     
     def analyze(self, question: str) -> str:
         """Run the agent to analyze a question about the current match.

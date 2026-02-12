@@ -23,6 +23,7 @@ def find_events(
     team: Optional[str] = None,
     outcome: Optional[str] = None,
     limit: int = 20,
+    **kwargs,
 ) -> ToolResult:
     """Find events by type, time, player, team, or outcome.
     
@@ -146,17 +147,22 @@ def find_goals(
     player: Optional[str] = None,
     minute_min: Optional[int] = None,
     minute_max: Optional[int] = None,
+    limit: Optional[int] = 20,
+    **kwargs,
 ) -> ToolResult:
-    """Find all goals in match, optionally by team, player, or time window.
+    """Find goals in match. Can filter by team, player, or time window.
     
-    Parameters:
+    Parameters (all optional):
     - team: team name substring
     - player: player name substring (scorer)
-    - minute_min/minute_max: time window
+    - minute_min: earliest minute
+    - minute_max: latest minute
+    - limit: max results (optional)
     
-    Returns goals with: event_id, minute, scorer, team, key_pass_id.
-    
-    Examples: find_goals(player="Benzema") or find_goals(team="Real Madrid", minute_min=0, minute_max=20)
+    Examples:
+    - {} returns all goals
+    - {"player": "Karim Benzema"} returns Benzema's goals
+    - {"team": "Real Madrid", "minute_min": 40} returns RM goals after 40m
     """
     where_conditions = []
     params = {}
@@ -191,13 +197,14 @@ RETURN
     COALESCE(event.player_name, 'Unknown') as scorer,
     COALESCE(event.team_name, 'Unknown') as team,
     event.shot_key_pass_id as key_pass_id
-ORDER BY event.minute ASC"""
+ORDER BY event.minute ASC
+LIMIT {limit}"""
     
     try:
         results = db.query(query, params)
         
         if not results:
-            return ToolResult(success=False, error="No goals found matching criteria")
+            return ToolResult(success=True, data=[])
         
         goals = [
             {
@@ -220,6 +227,7 @@ ORDER BY event.minute ASC"""
 def get_event_context(
     db: Neo4jClient,
     event_id: str,
+    **kwargs,
 ) -> ToolResult:
     """Get full buildup (possession chain) leading to an event - detailed tactical analysis.
     
@@ -318,6 +326,7 @@ def get_event_context(
 def get_event_summary(
     db: Neo4jClient,
     event_id: str,
+    **kwargs,
 ) -> ToolResult:
     """Get key moments leading to an event - concise summary for quick understanding.
     
@@ -404,6 +413,7 @@ def get_player_actions(
     minute_min: Optional[int] = None,
     minute_max: Optional[int] = None,
     limit: int = 10,
+    **kwargs,
 ) -> ToolResult:
     """Get player actions by event type, time window, team, or player.\n    \n    Parameters:\n    - event_type: Pressure, Tackle, Interception, Duel, Ball Recovery, etc.\n    - team: team name\n    - player: player name\n    - minute_min/minute_max: time window\n    - limit: max results\n    \n    Examples: get_player_actions(event_type=\"Tackle\", team=\"Real Madrid\") or get_player_actions(event_type=\"Pressure\", minute_min=0, minute_max=20)\n    """
     params = {}
@@ -482,6 +492,7 @@ def get_passing_pairs(
     minute_min: Optional[int] = None,
     minute_max: Optional[int] = None,
     limit: int = 10,
+    **kwargs,
 ) -> ToolResult:
     """Get passing partnerships: passer-recipient pairs and pass counts.
     
@@ -549,6 +560,7 @@ def get_team_stats(
     metric: str = "all",
     minute_min: Optional[int] = None,
     minute_max: Optional[int] = None,
+    **kwargs,
 ) -> ToolResult:
     """Get aggregated team statistics: possession, pass completion, shots, etc.
     
@@ -645,6 +657,7 @@ def get_team_formation(
     db: Neo4jClient,
     team_id: str,
     minute: int,
+    **kwargs,
 ) -> ToolResult:
     """Get the formation a team was using at a specific moment.
     
@@ -697,124 +710,10 @@ def get_team_formation(
         return ToolResult(success=False, error=str(e), raw_query=query)
 
 
-def get_pressing_intensity(
-    db: Neo4jClient,
-    period: Optional[int] = None,
-    minute_min: Optional[int] = None,
-    minute_max: Optional[int] = None,
-    team: Optional[str] = None,
-    limit: int = 10,
-) -> ToolResult:
-    """Analyze pressing events. DEPRECATED - use get_player_actions(event_type="Pressure") instead.
-    
-    For backward compatibility, converts period to minute ranges:
-    - period 1 = minute_min=0, minute_max=45
-    - period 2 = minute_min=45, minute_max=90
-    
-    But it's better to use: get_player_actions(event_type="Pressure", minute_min=X, minute_max=Y)
-    """
-    # Convert period to minute ranges for backward compatibility
-    if period == 1:
-        minute_min, minute_max = 0, 45
-    elif period == 2:
-        minute_min, minute_max = 45, 90
-    
-    return get_player_actions(
-        db,
-        event_type="Pressure",
-        team=team,
-        minute_min=minute_min,
-        minute_max=minute_max,
-        limit=limit
-    )
-
-
-def get_possession_stats(
-    db: Neo4jClient,
-    period: Optional[int] = None,
-    minute_min: Optional[int] = None,
-    minute_max: Optional[int] = None,
-) -> ToolResult:
-    """Get team possession statistics. DEPRECATED - use get_team_stats(metric="possession", minute_min=X, minute_max=Y) instead.
-    
-    For backward compatibility, converts period to minute ranges:
-    - period 1 = minute_min=0, minute_max=45
-    - period 2 = minute_min=45, minute_max=90
-    
-    Better to use: get_team_stats(metric="possession", minute_min=0, minute_max=45)
-    """
-    # Convert period to minute ranges for backward compatibility
-    if period == 1:
-        minute_min, minute_max = 0, 45
-    elif period == 2:
-        minute_min, minute_max = 45, 90
-    
-    return get_team_stats(db, metric="possession", minute_min=minute_min, minute_max=minute_max)
-
-
-def get_attacking_patterns(
-    db: Neo4jClient,
-    period: Optional[int] = None,
-    minute_min: Optional[int] = None,
-    minute_max: Optional[int] = None,
-) -> ToolResult:
-    """Analyze shots. DEPRECATED - use find_events(event_type='Shot', minute_min=X, minute_max=Y) instead.
-    Backward compatible: period 1 = 0-45 minutes, period 2 = 45-90 minutes."""
-    if period == 1:
-        minute_min, minute_max = 0, 45
-    elif period == 2:
-        minute_min, minute_max = 45, 90
-    return find_events(db, event_type="Shot", minute_min=minute_min, minute_max=minute_max)
-
-
-def analyze_transitions(
-    db: Neo4jClient,
-    period: Optional[int] = None,
-    minute_min: Optional[int] = None,
-    minute_max: Optional[int] = None,
-) -> ToolResult:
-    """Analyze transitions. DEPRECATED - use get_player_actions(event_type='BallRecovery', minute_min=X) instead.
-    Backward compatible: period 1 = 0-45 minutes, period 2 = 45-90 minutes."""
-    if period == 1:
-        minute_min, minute_max = 0, 45
-    elif period == 2:
-        minute_min, minute_max = 45, 90
-    return get_player_actions(db, event_type="BallRecovery", minute_min=minute_min, minute_max=minute_max)
-
-
-def get_pass_network(
-    db: Neo4jClient,
-    team: Optional[str] = None,
-    period: Optional[int] = None,
-) -> ToolResult:
-    """Analyze passing partnerships. DEPRECATED - use get_passing_pairs(team=X, minute_min=Y) instead.
-    Backward compatible: period 1 = 0-45 minutes, period 2 = 45-90 minutes."""
-    minute_min, minute_max = None, None
-    if period == 1:
-        minute_min, minute_max = 0, 45
-    elif period == 2:
-        minute_min, minute_max = 45, 90
-    return get_passing_pairs(db, team=team, minute_min=minute_min, minute_max=minute_max)
-
-
-def analyze_defensive_organization(
-    db: Neo4jClient,
-    period: Optional[int] = None,
-    minute_min: Optional[int] = None,
-    minute_max: Optional[int] = None,
-) -> ToolResult:
-    """Analyze defensive actions. DEPRECATED - use get_player_actions(event_type='Tackle', minute_min=X) instead.
-    Backward compatible: period 1 = 0-45 minutes, period 2 = 45-90 minutes."""
-    if period == 1:
-        minute_min, minute_max = 0, 45
-    elif period == 2:
-        minute_min, minute_max = 45, 90
-    return get_player_actions(db, event_type="Tackle", minute_min=minute_min, minute_max=minute_max)
-
-
 def get_match_players(
     db: Neo4jClient,
     team: Optional[str] = None,
+    **kwargs,
 ) -> ToolResult:
     """Get list of all players in the match, optionally filtered by team.
     

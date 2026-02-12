@@ -1,5 +1,6 @@
 # Python-generated files
 __pycache__/
+.pytest_cache/
 *.py[oc]
 build/
 dist/
@@ -17,3 +18,6 @@ data/
 
 # Github Copilot files
 SYSTEM_REVIEW.md
+
+# Ollama
+ollama/
