@@ -168,7 +168,47 @@ class TacticalAgent:
             except Exception as e:
                 result = ToolResult(success=False, error=f"Execution failed: {str(e)}")
                 print(f"[ACT] Execution error: {e}")
-            
+
+            # Ensure a pretty-printed textual representation exists for LLM consumption.
+            try:
+                pretty = json.dumps(result.data, indent=2, ensure_ascii=False, default=str)
+            except Exception:
+                pretty = str(result.data) if result.data is not None else None
+
+            # Build a concise summary line for quick scanning by the LLM
+            summary = ""
+            try:
+                if isinstance(result.data, list):
+                    count = len(result.data)
+                    if count > 0 and isinstance(result.data[0], dict):
+                        sample_keys = list(result.data[0].keys())[:4]
+                        summary = f"{count} items — keys: {', '.join(sample_keys)}"
+                    else:
+                        summary = f"{count} items"
+                elif isinstance(result.data, dict):
+                    ks = list(result.data.keys())[:6]
+                    summary = f"keys: {', '.join(ks)}"
+                elif result.data is None:
+                    summary = "no data"
+                else:
+                    summary = ""
+            except Exception:
+                summary = ""
+
+            if pretty:
+                if summary:
+                    result.data_pretty = f"SUMMARY: {summary}\nFULL_DATA_START\n{pretty}\nFULL_DATA_END"
+                else:
+                    result.data_pretty = f"FULL_DATA_START\n{pretty}\nFULL_DATA_END"
+            else:
+                # If no structured data, surface the error or raw query for debugging
+                if result.error:
+                    result.data_pretty = f"ERROR: {result.error}"
+                elif getattr(result, 'raw_query', None):
+                    result.data_pretty = f"RAW_QUERY:\n{result.raw_query}"
+                else:
+                    result.data_pretty = None
+
             state.tool_calls.append((tool_name, tool_input))
             state.tool_results.append(result)
             

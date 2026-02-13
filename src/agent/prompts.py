@@ -145,38 +145,60 @@ def format_iteration_history(
             if hasattr(result, 'success'):
                 status = "✓" if result.success else "✗"
                 
-                if result.success:
-                    data = result.data
-                    # Format structured data for readability without truncation
-                    if isinstance(data, list) and len(data) > 0:
-                        if isinstance(data[0], dict):
-                            # List of dicts: show each item with key fields
-                            formatted_items = []
-                            for item in data:
-                                # Extract key identifying fields in order of importance
-                                key_fields = []
-                                for key in ['event_id', 'minute', 'scorer', 'player', 'team', 'event_type', 'from', 'to']:
-                                    if key in item:
-                                        key_fields.append(f"{key}='{item[key]}'")
-                                if key_fields:
-                                    formatted_items.append("{" + ", ".join(key_fields) + "}")
-                            history_lines.append(f"  {status} [{', '.join(formatted_items)}]")
+                # Prefer pretty-printed textual representation if available
+                pretty = getattr(result, "data_pretty", None)
+                if pretty:
+                    # Add a short summary line then include the pretty block
+                    try:
+                        if isinstance(result.data, list):
+                            summary = f"{len(result.data)} items"
+                            sample_keys = list(result.data[0].keys())[:4] if result.data else []
+                            if sample_keys:
+                                summary += f" — keys: {', '.join(sample_keys)}"
+                        elif isinstance(result.data, dict):
+                            ks = list(result.data.keys())[:6]
+                            summary = f"keys: {', '.join(ks)}"
                         else:
-                            # List of primitives: show as-is
-                            history_lines.append(f"  {status} {data}")
-                    else:
-                        # Scalars or complex objects: convert to string without truncation
-                        msg_str = str(data)
-                        # Only truncate if exceptionally long (e.g., > 500 chars)
-                        if len(msg_str) > 500:
-                            msg_str = msg_str[:500] + "..."
-                        history_lines.append(f"  {status} {msg_str}")
+                            summary = ""
+                    except Exception:
+                        summary = ""
+
+                    history_lines.append(f"  {status} {summary}")
+                    for pl in pretty.splitlines():
+                        history_lines.append(f"  {pl}")
                 else:
-                    # Error case
-                    error_msg = str(result.error)
-                    if len(error_msg) > 200:
-                        error_msg = error_msg[:200] + "..."
-                    history_lines.append(f"  {status} Error: {error_msg}")
+                    if result.success:
+                        data = result.data
+                        # Format structured data for readability without truncation
+                        if isinstance(data, list) and len(data) > 0:
+                            if isinstance(data[0], dict):
+                                # List of dicts: show each item with key fields
+                                formatted_items = []
+                                for item in data:
+                                    # Extract key identifying fields in order of importance
+                                    key_fields = []
+                                    for key in ['event_id', 'minute', 'scorer', 'player', 'team', 'event_type', 'from', 'to']:
+                                        if key in item:
+                                            key_fields.append(f"{key}='{item[key]}'")
+                                    if key_fields:
+                                        formatted_items.append("{" + ", ".join(key_fields) + "}")
+                                history_lines.append(f"  {status} [{', '.join(formatted_items)}]")
+                            else:
+                                # List of primitives: show as-is
+                                history_lines.append(f"  {status} {data}")
+                        else:
+                            # Scalars or complex objects: convert to string without truncation
+                            msg_str = str(data)
+                            # Only truncate if exceptionally long (e.g., > 500 chars)
+                            if len(msg_str) > 500:
+                                msg_str = msg_str[:500] + "..."
+                            history_lines.append(f"  {status} {msg_str}")
+                    else:
+                        # Error case
+                        error_msg = str(result.error)
+                        if len(error_msg) > 200:
+                            error_msg = error_msg[:200] + "..."
+                        history_lines.append(f"  {status} Error: {error_msg}")
     
     return "\n".join(history_lines)
 

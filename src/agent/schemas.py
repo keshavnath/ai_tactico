@@ -74,3 +74,7 @@ class ToolResult(BaseModel):
     data: Optional[Any] = None
     error: Optional[str] = None
     raw_query: Optional[str] = None  # For debugging
+    # Pretty-printed textual representation intended for LLM consumption.
+    # This should contain the full JSON/text output the model will see,
+    # delimited if necessary (e.g. FULL_DATA_START / FULL_DATA_END).
+    data_pretty: Optional[str] = None
