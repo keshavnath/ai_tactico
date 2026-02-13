@@ -76,11 +76,15 @@ def create_app():
         
         try:
             # Run agent analysis
-            answer = agent.analyze(question)
-            
+            result = agent.analyze(question)
+            # result is now a dict: {"answer": ..., "trace": [...]}
+            answer = result.get("answer") if isinstance(result, dict) else result
+            trace = result.get("trace") if isinstance(result, dict) else []
+
             return jsonify({
                 "question": question,
                 "answer": answer,
+                "trace": trace,
                 "success": True
             })
         except Exception as e:

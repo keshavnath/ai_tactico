@@ -335,7 +335,7 @@ Answer:"""
         else:
             return "end"
     
-    def analyze(self, question: str) -> str:
+    def analyze(self, question: str) -> dict:
         """Run the agent to analyze a question about the current match.
         
         Args:
@@ -349,23 +349,65 @@ Answer:"""
         final_state = self.graph.invoke(initial_state)
         
         # Debug: check final state type
+        # Normalize final_state to an object with attributes for easier access
         if isinstance(final_state, dict):
             print(f"DEBUG: final_state is a dict: {list(final_state.keys())}")
-            # Try to extract from dict
-            if "thoughts" in final_state:
-                num_iterations = len(final_state["thoughts"])
-            else:
-                num_iterations = 0
-            final_answer = final_state.get("final_answer", "Unable to generate analysis")
+            # Create a lightweight proxy object
+            class _S: pass
+            s = _S()
+            s.thoughts = final_state.get("thoughts", [])
+            s.tool_calls = final_state.get("tool_calls", [])
+            s.tool_results = final_state.get("tool_results", [])
+            s.final_answer = final_state.get("final_answer")
+            final_state_obj = s
         else:
-            num_iterations = len(final_state.thoughts)
-            final_answer = final_state.final_answer or "Unable to generate analysis"
+            final_state_obj = final_state
+
+        num_iterations = len(final_state_obj.thoughts) if getattr(final_state_obj, 'thoughts', None) else 0
+        final_answer = final_state_obj.final_answer or "Unable to generate analysis"
         
         print(f"\n{'='*60}")
         print(f"Analysis complete in {num_iterations} iterations")
         print(f"{'='*60}\n")
         
-        return final_answer
+        # Build a structured trace for frontend visualization
+        trace = []
+        thoughts = getattr(final_state_obj, 'thoughts', []) or []
+        tool_calls = getattr(final_state_obj, 'tool_calls', []) or []
+        tool_results = getattr(final_state_obj, 'tool_results', []) or []
+
+        # Iterate through thoughts and corresponding tool calls/results
+        maxlen = max(len(thoughts), len(tool_calls))
+        for i in range(maxlen):
+            if i < len(thoughts):
+                trace.append({
+                    "stage": "thought",
+                    "index": i,
+                    "text": thoughts[i]
+                })
+            if i < len(tool_calls):
+                tname, tparams = tool_calls[i]
+                tres = tool_results[i] if i < len(tool_results) else None
+                trace.append({
+                    "stage": "action",
+                    "index": i,
+                    "tool": tname,
+                    "parameters": tparams,
+                    "success": getattr(tres, 'success', False) if tres is not None else False,
+                    "data_pretty": getattr(tres, 'data_pretty', None) if tres is not None else None,
+                    "error": getattr(tres, 'error', None) if tres is not None else None,
+                })
+
+        # Append any trailing thoughts (e.g., reflections) beyond paired iterations
+        if len(thoughts) > maxlen:
+            for j in range(maxlen, len(thoughts)):
+                trace.append({
+                    "stage": "thought",
+                    "index": j,
+                    "text": thoughts[j]
+                })
+
+        return {"answer": final_answer, "trace": trace}
 
 
 def create_agent(
