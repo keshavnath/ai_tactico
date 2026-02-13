@@ -64,9 +64,8 @@ async function submitQuestion() {
         
         const data = await response.json();
         
-        // Remove loading message
-        removeMessage(loadingId);
-        // Render real trace if present, otherwise mark complete
+        // Remove any loading messages (defensive) and render trace or complete
+        removeAllLoadingMessages();
         if (data && Array.isArray(data.trace) && data.trace.length > 0) {
             renderTrace(data.trace);
         } else {
@@ -78,8 +77,19 @@ async function submitQuestion() {
         } else {
             addMessage('error', data.error || 'An error occurred');
         }
+
+        // Ensure user's question is visible after completion
+        try {
+            const users = document.querySelectorAll('.message.user');
+            if (users && users.length) {
+                const lastUser = users[users.length - 1];
+                lastUser.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+        } catch (e) {
+            // ignore scrolling errors
+        }
     } catch (error) {
-        removeMessage(loadingId);
+        removeAllLoadingMessages();
         failAgentProcess();
         addMessage('error', `Error: ${error.message}`);
         console.error('Error:', error);

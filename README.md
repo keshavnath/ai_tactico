@@ -2,7 +2,7 @@
 
 **An AI Engineering exploration of agentic reasoning over knowledge graphs.**
 
-Football tactical analysis agent powered by **LangGraph ReAct**, Neo4j knowledge graphs, and specialized tool design. The agent performs iterative reasoning (think→act→reflect→answer) to answer complex tactical questions about football matches using StatsBomb event data.
+Football tactical analysis agent powered by **LangGraph ReAct**, Neo4j knowledge graphs, and specialized tool design. The agent performs iterative reasoning (think→act→reflect→answer) to answer complex tactical questions about football matches using [StatsBomb](https://github.com/statsbomb/open-data) football event data.
 
 ## Core Architecture: LangGraph ReAct Agent
 
@@ -24,99 +24,51 @@ User Question
 Response to User
 ```
 
-### Key Agent Components
+## Key Components
 
-**LangGraph Graph** (`src/agent/agent.py`):
+**LangGraph Agent Graph** (`src/agent/agent.py`):
 - 4-node directed graph: `_think_node` → `_act_node` → `_reflect_node` → `_answer_node`
 - Conditional edges: `_act_node` validates tool parsing; `_reflect_node` decides loop continuation
 - Early stopping: When agent produces "Final Answer:", loop terminates immediately
 - Max iterations: Prevents infinite reasoning loops (currently 10)
 
-**Prompt Engineering** (`src/agent/prompts.py`):
-- **System Prompt**: Establishes agent persona as tactical analyst, lists all 9 available tools with signatures
-- **ReAct Prompt**: Instructs agent on thought→action format, emphasizes tool docstrings as source of truth
-- **Reflection Prompt**: Decision tree for tool result analysis (Is it factual? Complete? Tactical? Actionable?)
-
-**Tool Discovery** (`src/agent/tools.py`):
-- 9 specialized tools via Neo4j queries (not hardcoded, extracted from docstrings)
-- MCP-style docstring-based discovery: Agent reads tool docstrings to understand capabilities
-- Response limits optimized for qwen3:1.7b: LIMIT 10 partnerships, LIMIT 6 defenders, etc.
-
-### Agent Flow in Practice
-
-**Example: "Explain the buildup to the first goal"**
-
-```
-THINK: "I need to find the goal event first, then trace the possession chain leading to it"
-  → Identified information needs: goal timing, possession sequence, formation context
-
-ACT: Tool call → find_goals()
-  Returns: [{"goal_id": 2345, "scorer": "Benzema", "minute": 50, ...}]
-
-REFLE CT: "I have the goal, now I need the buildup. Is this enough? No, need possession chain."
-  → Decision: Continue reasoning
-
-ACT: Tool call → get_possession_before_event(event_id=2345)
-  Returns: [Pass chain of 12 events leading to shot]
-
-REFLECT: "Good, I have context but should verify tactical setup at goal time"
-  → Decision: One more tool call needed
-
-ACT: Tool call → get_team_formation(team_id=..., minute=50)
-  Returns: Formation snapshot showing attacking positioning
-
-REFLECT: "Sufficient data to explain. I have goal, buildup sequence, and formation context."
-  → Decision: Answer now (Final Answer: ...)
-
-ANSWER: "Benzema's goal at minute 50 came through a patient buildup where Real Madrid 
-maintained width with fullback support. The final three passes shifted from lateral to 
-vertical penetration, exploiting Bayern's narrow mid-block positioning..."
-```
-
-## Stack
-
-- **Language Model**: Ollama qwen3:1.7b (1.7B parameters, local execution)
-- **Agent Framework**: LangGraph 0.2+ (control flow + graph orchestration)
-- **Knowledge Graph**: Neo4j 5-community (event nodes, possession chains, player relationships)
-- **Data Source**: StatsBomb JSON (3.5k+ events per match)
-- **Backend**: Python 3.12 + uv
-- **Frontend**: Flask + HTML/CSS/JS (minimal, for interaction testing)
-
-## Current Status
-
-✓ **Agent System** (Core Focus)
-- LangGraph graph compiles and executes correctly
-- ReAct loop with proper conditional edges and early stopping
-- Reflection mechanism validates tool results and decides continuation
-- Handles malformed tool calls with error recovery
-- Tests verify agent terminates after final answer (not looping excessively)
-
-✓ **Tool System** (9 Specialized Queries)
+**Tool System** (9 Specialized Queries)
 - 9 Neo4j tools for football analysis (not general-purpose graph traversal)
-- Each tool optimized for specific tactical question type
+- Compact helper tools (`get_last_touch`, `get_possession_summary`, `get_highlights`) provide concise summaries and anomaly detection to support a helper-first workflow and reduce expensive full-chain queries
+- Tool for full posession-chain graph walks (`get_event_context`) after identifying key events from highlights.
 - Docstring-based discovery (agent reads docstrings to understand capabilities)
 - Response limits prevent context overflow on SLM
 - Complete data guarantees: Each tool returns all relevant results (no incomplete subsets)
 
-✓ **Knowledge Graph** (StatsBomb Events)
+**Knowledge Graph** (StatsBomb Events)
 - 3.5k+ events per match ingested into Neo4j
 - Type-specific nodes: Pass, Shot, Pressure, Duel, Formation, etc.
 - Possession chains linked temporally
 - Player-team-formation relationships preserved
 - Schema with constraints and indexes
 
-✓ **Prompt Engineering** (AI Engineering Focus)
-- System prompt lists all 9 tools explicitly
+**Prompt Engineering** (AI Engineering Focus)
+- System prompt lists output guidelines and expectations
 - ReAct prompt teaches agent to reason before acting
 - Reflection prompt implements decision tree for continuation logic
 - All prompts optimized for 1.7B parameter model (concise, structured, unambiguous)
 
-✓ **Test Isolation & Data Integrity**
+**Test Isolation & Data Integrity**
 - Tests don't corrupt production data (fixed critical pytest fixture bug)
 - Automatic cleanup of test data after session
 - 14 unit tests covering database, ingestion, client, and agent behaviors
 
 WIP: Advanced visualization, streaming responses, multi-match analysis
+
+## Stack
+
+- **Agent Framework**: LangGraph 0.2+ (control flow + graph orchestration)
+- **Knowledge Graph**: Neo4j 5-community (event nodes, possession chains, player relationships)
+- **Data Source**: StatsBomb JSON (3.5k+ events per match)
+- **Backend**: Flask in Python 3.12 + uv
+- **LLM client**: OpenAI-compatible wrapper in `src/agent/llm_client.py` with a configurable, in-process rate limiter for safer LLM usage
+- **Language Model**: Ollama qwen3:1.7b (1.7B parameters, local execution)
+- **Frontend**: HTML/CSS/JS (minimal) — includes an agent-process trace visualizer and improved message handling (prevents stale "Analyzing" messages and keeps the user's question visible)
 
 ## Setup
 
@@ -166,13 +118,7 @@ uv run python main.py
 ```
 Minimal Flask frontend with match info display and interactive Q&A. Best way to interact with the agent.
 
-### Option 2: Interactive CLI (For Development)
-```bash
-uv run python agent.py
-```
-Prompts for tactical questions interactively. Shows agent's thinking → acting → reflecting process. Useful for debugging agent reasoning.
-
-### Option 3: Python API (For Programmatic Use)
+### Option 2: Python API (For Programmatic Use)
 ```python
 from src.agent import create_agent
 from src.db import Neo4jClient
@@ -197,37 +143,79 @@ uv run pytest tests/test_client.py -v
 
 ## Example Agent Reasoning
 
-**User Question**: "How was the first goal scored?"
+**User Question**: "How was Bale's second goal scored?"
 
 **Agent Thinking Process** (shown in CLI):
 ```
-THINKING:
-"To answer how the goal was scored, I need to:
-1. Find the goal event and identify the scorer
-2. Get the possession chain leading to the goal to understand the buildup
-3. Check the formation at the time to understand tactical context"
+[THINK] Iteration 1
+{
+  "thinking": "User asked about the second goal. First find all goals to identify the second one",
+  "action": "find_goals",
+  "parameters": {}
+}
+[ACT] Calling find_goals({})
+[ACT] Success: [{'event_id': '7654fe57-734f-45d8-bc83-ab940cd37c45', 'minute': 50, 'period': 2, 'scorer': 'Karim Benzema', 'team': 'Real Madrid', 'key_pass_id': None}, {'event_id': '53b73ee0-8c9c-4b64-83c5-69fc453376a1', 'minute': 54, 'period': 2, 'scorer': 'Sadio Mané', 'team': 'Liverpool', 'key_pass_id': None}, {'event_id': '36687201-f131-4418-9dd0-f632bc9c4257', 'minute': 63, 'period': 2, 'scorer': 'Gareth Frank Bale', 'team': 'Real Madrid', 'key_pass_id': 'ff375f8e-d488-4442-b7a6-73c7283fc371'}, {'event_id': '05688a6e-37f8-4aa6-a36e-d8151aa75997', 'minute': 82, 'period': 2, 'scorer': 'Gareth Frank Bale', 'team': 'Real Madrid', 'key_pass_id': 'c3ace7b4-1cb2-471b-b910-85322bd0dac8'}]
 
-ACTION: Tool Call → find_goals()
-Result: Goal at minute 50 by Benzema (event_id: 2345)
+[REFLECT] Evaluating 1 result(s)
+{
+  "decision": "incomplete",
+  "missing": "Need buildup context - call get_event_context(event_id) with second goal's event_id to get pass sequences"
+}
 
-THINKING:
-"Good, I found the goal. Now I need the buildup sequence . Let me get
-the possession chain before this goal event."
+[THINK] Iteration 3
+{
+  "thinking": "Found goal at minute 82. Now get buildup context",
+  "action": "get_event_context",
+  "parameters": {"event_id": "05688a6e-37f8-4aa6-a36e-d8151aa75997"}
+}
+[ACT] Calling get_event_context({'event_id': '05688a6e-37f8-4aa6-a36e-d8151aa75997'})
+[ACT] Success: {'event': {'event_type': 'Shot', 'event_minute': 82, 'event_period': 2, 'event_outcome': 'Goal'}, 'buildup_chain': 'Sergio Ramos García → Marcelo Vieira da Silva Júnior → Marcelo Vieira da Silva Júnior → Cristiano Ronaldo dos Santos Aveiro → Cristiano Ronaldo dos Santos Aveiro → Marcelo Vieira da Silva Júnior → Marcelo Vieira da Silva Júnior → Gareth Frank Bale', 'buildup_passes': [{'from': 'Sergio Ramos García', 'to': 'Marcelo Vieira da Silva Júnior', 'minute': 82, 'second': 29, 'length': 17.962183, 'angle': -0.3287927, 'start_location': (45.8, 7.4), 'end_location': None}, {'from': 'Marcelo Vieira da Silva Júnior', 'to': 'Cristiano Ronaldo dos Santos Aveiro', 'minute': 82, 'second': 33, 'length': 14.1, 'angle': 0.0, 'start_location': (62.8, 1.6), 'end_location': None}, {'from': 'Cristiano Ronaldo dos Santos Aveiro', 'to': 'Marcelo Vieira da Silva Júnior', 'minute': 82, 'second': 35, 'length': 8.489994, 'angle': 2.3895154, 'start_location': (76.9, 1.6), 'end_location': None}, {'from': 'Marcelo Vieira da Silva Júnior', 'to': 'Gareth Frank Bale', 'minute': 82, 'second': 38, 'length': 54.98309, 'angle': 1.32273, 'start_location': (77.2, 14.5), 'end_location': None}], 'total_passes': 4}
 
-ACTION: Tool Call → get_possession_before_event(event_id=2345)
-Result: 12 event possession chain showing passes and positioning
+[REFLECT] Evaluating 2 result(s)
+{
+  "decision": "complete",
+  "reason": "Data contains 'buildup_chain' showing pass sequences leading to the goal"
+}
 
-REFLECTION:
-"I have the goal event and the buildup sequence. The data shows a
-possession chain of 12 passes leading to Benzema's shot. I have
-enough information to explain how the goal was scored."
+[FINAL] Answer ready
 
-FINAL ANSWER:
-"Benzema scored at minute 50 through a coordinated team play. Real Madrid
-controlled possession with 12 consecutive passes, maintaining 88% accuracy.
-The buildup featured intelligent width play, pulling Bayern's defense wide
-before a final vertical pass through the midfield released Benzema into
-shooting space. His finish was clinical and unstoppable."
+[ANSWER] Generating final answer...
+The second goal was scored by Gareth Frank Bale in the 82nd minute following a series of precise passes. The buildup involved a chain of passes from Sergio Ramos to Marcelo Vieira da Silva Júnior, then to Cristiano Ronaldo dos Santos Aveiro, culminating in a final pass to Bale, who converted the shot.
+DEBUG: final_state is a dict: ['user_question', 'thoughts', 'tool_calls', 'tool_results', 'final_answer', 'confidence', 'parse_failures']
+
+============================================================
+Analysis complete in 4 iterations
+============================================================
+```
+
+**User Question**: "which players passed to each other the most for liverpool?"
+
+**Agent Thinking Process** (shown in CLI):
+```
+[THINK] Iteration 1
+{
+  "thinking": "User asked about passing partnerships for Liverpool. Use get_passing_pairs to retrieve passing partnerships for the team.",
+  "action": "get_passing_pairs",
+  "parameters": {"team": "Liverpool"}
+}
+[ACT] Calling get_passing_pairs({'team': 'Liverpool'})
+[ACT] Success: [{'passer': 'Trent Alexander-Arnold', 'recipient': 'Roberto Firmino Barbosa de Oliveira', 'passes': 10}, {'passer': 'Virgil van Dijk', 'recipient': 'Andrew Robertson', 'passes': 10}, {'passer': 'Georginio Wijnaldum', 'recipient': 'Trent Alexander-Arnold', 'passes': 8}, {'passer': 'James Philip Milner', 'recipient': None, 'passes': 8}, {'passer': 'Andrew Robertson', 'recipient': 'Jordan Brian Henderson', 'passes': 7}, {'passer': 'Trent Alexander-Arnold', 'recipient': 'Mohamed Salah', 'passes': 7}, {'passer': 'Loris Karius', 'recipient': 'Dejan Lovren', 'passes': 7}, {'passer': 'Trent Alexander-Arnold', 'recipient': None, 'passes': 6}, {'passer': 'Jordan Brian Henderson', 'recipient': 'Sadio Mané', 'passes': 6}, {'passer': 'Andrew Robertson', 'recipient': 'Sadio Mané', 'passes': 6}]
+
+[REFLECT] Evaluating 1 result(s)
+{
+  "decision": "complete",
+  "reason": "Have complete list of pass interactions with counts per player, sufficient to identify top pairs (e.g., Trent Alexander-Arnold & Roberto Firmino with 10 passes each)"
+}
+
+[FINAL] Answer ready
+
+[ANSWER] Generating final answer...
+Trent Alexander-Arnold passed the most (10) to Roberto Firmino, while Virgil van Dijk also passed 10 to Andrew Robertson. Georginio Wijnaldum contributed 8 passes to Trent Alexander-Arnold, making them the top passers.
+DEBUG: final_state is a dict: ['user_question', 'thoughts', 'tool_calls', 'tool_results', 'final_answer', 'confidence', 'parse_failures']
+
+============================================================
+Analysis complete in 2 iterations
+============================================================
 ```
 
 **Key Points Shown**:
@@ -268,7 +256,6 @@ ai_tactico/
 │   └── ...
 │
 ├── data/                         # StatsBomb match data (JSON)
-├── agent.py                      # CLI entry point (interactive agent)
 ├── main.py                       # Flask web app entry point
 ├── load_data.py                  # Data loader script
 ├── docker-compose.yml            # Neo4j infrastructure
@@ -295,7 +282,7 @@ ai_tactico/
   - Response limits: LIMIT 10, 6, etc. for SLM efficiency
 
 **Knowledge Graph** (`src/db/`):
-- Event-centric schema: Pass, Shot, Pressure, Duel, Formation nodes
+- Event-centric schema: Pass, Shot, Pressure, Duel, etc.
 - Possession chains linked temporally
 - Player-team-formation relationships
 - Constraints enforce data integrity
@@ -340,19 +327,3 @@ ai_tactico/
 - Average analysis time: 5-15 seconds per question
 - Database queries execute in <100ms
 - Tool responses limited to prevent context overflow on SLM
-
-## Troubleshooting
-
-### Data disappeared after running tests
-- **Root cause**: Old pytest fixture cleared all data
-- **Status**: FIXED - Now uses test IDs and auto-cleanup
-- **Verification**: `uv run pytest tests/ -v` leaves only `match_18245` in DB
-
-### Agent takes too long to respond
-- Check if Ollama is running: `ollama serve` in separate terminal
-- Verify model is pulled: `ollama list` should show `qwen3:1.7b`
-
-### Database connection errors
-- Ensure Neo4j is running: `docker-compose up -d`
-- Check connection settings in `main.py` or `agent.py`
-- Default: `bolt://localhost:7687` user: `neo4j` password: `password`
