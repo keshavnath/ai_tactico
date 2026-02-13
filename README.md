@@ -2,7 +2,9 @@
 
 **An AI Engineering exploration of agentic reasoning over knowledge graphs.**
 
-Football tactical analysis agent powered by **LangGraph ReAct**, Neo4j knowledge graphs, and specialized tool design. The agent performs iterative reasoning (think→act→reflect→answer) to answer complex tactical questions about football matches using [StatsBomb](https://github.com/statsbomb/open-data) football event data.
+Football tactical analysis agent powered by **LangGraph ReAct**, Neo4j knowledge graphs, and specialized tool design. The agent performs iterative reasoning (think→act→reflect→answer) to answer complex questions about football matches using [StatsBomb](https://github.com/statsbomb/open-data) football event data.
+
+![AI Tactico Header](./img/header.png)
 
 ## Core Architecture: LangGraph ReAct Agent
 
@@ -23,6 +25,10 @@ User Question
     ↓
 Response to User
 ```
+
+![Sample Q/A](./img/sample_qa.png)
+
+![Sample Subgraph](./img/sample_subgraph.png)
 
 ## Key Components
 
@@ -46,6 +52,7 @@ Response to User
 - Possession chains linked temporally
 - Player-team-formation relationships preserved
 - Schema with constraints and indexes
+- See [SCHEMA.md](./src/db/SCHEMA.md) for more details
 
 **Prompt Engineering** (AI Engineering Focus)
 - System prompt lists output guidelines and expectations
@@ -90,7 +97,7 @@ uv sync
 # 3. Start Ollama (in separate terminal for LLM inference)
 ollama serve
 
-# Pull the model (one time)
+# 4. Pull the model (one time)
 ollama pull qwen3:1.7b
 
 # 5. Load StatsBomb data into Neo4j
