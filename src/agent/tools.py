@@ -896,14 +896,42 @@ def get_highlights(db: Neo4jClient, event_id: str, window: int = 6, **kwargs) ->
 
         highlights = []
 
-        # 1) Last touch (cross-team or goalkeeper/defender passer)
+        # 1) Last touch (possession pass) and an event-agnostic prior event
         last = get_last_touch(db, event_id)
         last_data = last.data if last.success else {}
+
+        # Always fetch the most recent prior event (any type) before the target as
+        # `last_event` so callers have an event-agnostic last-event reference.
+        last_event = None
+        try:
+            fb_q = """
+            MATCH (t:Event {id: $event_id})
+            MATCH (e:Event)
+            WHERE (e.minute < t.minute OR (e.minute = t.minute AND e.second < t.second))
+            RETURN e.id as event_id, e.player_name as player, e.team_name as team, e.position_name as position, e.type as type, e.minute as minute, e.second as second
+            ORDER BY e.minute DESC, e.second DESC
+            LIMIT 1
+            """
+            fb_r = db.query(fb_q, {"event_id": event_id})
+            if fb_r:
+                fr = fb_r[0]
+                last_event = {
+                    "event_id": fr.get("event_id"),
+                    "player": fr.get("player"),
+                    "team": fr.get("team"),
+                    "minute": fr.get("minute"),
+                    "second": fr.get("second"),
+                    "position": fr.get("position"),
+                    "type": fr.get("type"),
+                }
+        except Exception:
+            last_event = None
         if last_data:
             last_team = last_data.get("team")
             last_player = last_data.get("player")
             last_position = last_data.get("position") or ""
-            if last_team and team_name and last_team != team_name:
+            # normalize compare
+            if last_team and team_name and str(last_team).lower() != str(team_name).lower():
                 highlights.append({
                     "type": "cross_team_last_touch",
                     "detail": "Last touch before event by opponent",
@@ -912,11 +940,17 @@ def get_highlights(db: Neo4jClient, event_id: str, window: int = 6, **kwargs) ->
                     "team": last_team,
                     "minute": last_data.get("minute"),
                 })
-            # Goalkeeper/defender as last passer
-            if last_position and last_position.lower().startswith("goalkeeper"):
-                highlights.append({"type": "last_passer_goalkeeper", "detail": "Last passer was a goalkeeper", "player": last_player})
-            elif last_position and "defender" in last_position.lower():
-                highlights.append({"type": "last_passer_defender", "detail": "Last passer was a defender", "player": last_player})
+            # Goalkeeper/defender as last passer - accept common abbreviations
+            if last_position:
+                lp = last_position.lower()
+                if lp.startswith("goalkeeper") or lp == "gk" or "goalkeeper" in lp or lp.startswith("keeper"):
+                    highlights.append({"type": "last_passer_goalkeeper", "detail": "Last passer was a goalkeeper", "player": last_player})
+                elif "defender" in lp or lp.startswith("df"):
+                    highlights.append({"type": "last_passer_defender", "detail": "Last passer was a defender", "player": last_player})
+            else:
+                # If position missing but event type exists and suggests goalkeeper (e.g., 'GoalKick'), mark as goalkeeper
+                if last_data.get("type") and str(last_data.get("type")).lower() in ("goalkick", "goal_kick", "goal kick"):
+                    highlights.append({"type": "last_passer_goalkeeper", "detail": "Last passer/event was a goalkeeper action (goal kick)", "player": last_player})
 
         # 2) Any deflections in possession (pass_deflected or shot_deflected)
         def_q = "MATCH (pos:Possession {id: $pos_id})-[:CONTAINS]->(e:Event) WHERE e.type='Pass' AND e.pass_deflected = true RETURN count(e) as deflections"
@@ -982,6 +1016,8 @@ def get_highlights(db: Neo4jClient, event_id: str, window: int = 6, **kwargs) ->
             "possession_event_count": event_count,
             "possession_pass_count": pass_count,
             "shot_xg": shot_xg,
+            "last_touch": last_data or {},
+            "last_event": last_event or {},
         }
 
         return ToolResult(success=True, data={"highlights": highlights, "features": features}, raw_query="get_highlights")
