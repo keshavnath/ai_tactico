@@ -14,14 +14,17 @@ ENUMERATION: User wants to know WHAT exists or WHICH items match criteria
 CAUSALITY: User wants to understand HOW something happened or WHY it occurred
 → Examples: "how did goal happen", "explain the buildup", "what led to X", "why did Y occur"
 → Data needed: Facts PLUS context (sequence of events, player interactions, timing)
-→ Tools: find_goals() THEN get_event_context() or get_event_summary() → both required
+→ Tools: find_goals() THEN prefer `get_event_summary()` or `get_highlights()` first, then `get_event_context()` for drill-down
 
 == USING TOOLS CORRECTLY ==
-1. Start with find_goals() - can pass optional filters (player, team, minute_min, minute_max) or empty {}
-2. Then check if question needs CAUSALITY explanation
-3. If yes: Extract event_id from results, call get_event_context() or get_event_summary()
-4. get_event_context(): For detailed causality analysis
-5. get_event_summary(): For quick causality understanding
+1. Start with `find_goals()` - can pass optional filters (player, team, minute_min, minute_max) or empty {}
+2. If question needs CAUSALITY explanation:
+    a. First call `get_event_summary(event_id)` or `get_highlights(event_id)` to get a concise summary and any anomalies/highlights.
+    b. Only call `get_event_context(event_id)` if you need the full pass chain or to verify details from the highlights.
+3. Use `get_last_touch(event_id)` for a focused check of the final touch before an event.
+4. Use `get_possession_summary(possession_id)` for compact possession-level metrics.
+5. get_event_context(): For detailed causality analysis when full chain is required
+6. get_event_summary(): For quick causality understanding
 
 == CRITICAL RULES ==
 1. NEVER guess player names, team names, or event_ids - query first
@@ -41,7 +44,6 @@ def get_react_prompt(
         return f"""Question: {question}
 
 Provide Final Answer based on tool data. Keep it to 1-3 sentences. Only facts - no speculation."""
-    
     # Format tool descriptions using docstrings
     if tools and isinstance(tools[0], dict) and "docstring" in tools[0]:
         tools_desc = "\n".join([
@@ -55,7 +57,7 @@ Provide Final Answer based on tool data. Keep it to 1-3 sentences. Only facts - 
         ])
     else:
         tools_desc = "\n".join([f"- {t}" for t in tools])
-    
+
     history_section = ""
     if iteration_history:
         history_section = f"""TRIED ALREADY:
@@ -78,13 +80,29 @@ find_goals(team, player, minute_min, minute_max):
     * {{"player": "Benzema"}} returns Benzema's goals
     * {{"team": "Real Madrid", "minute_min": 40}} returns RM goals after 40m
 
-get_event_context(event_id):
-  - REQUIRES event_id
-  - Example: {{"event_id": "abc123"}}
-
 get_event_summary(event_id):
-  - REQUIRES event_id
-  - Example: {{"event_id": "abc123"}}
+    - REQUIRES event_id
+    - Returns: concise list of key passes (3-5) and event metadata
+    - Example: {{"event_id": "abc123"}}
+
+get_highlights(event_id):
+    - REQUIRES event_id
+    - Returns: small array of highlighted facts (e.g., cross_team_last_touch, last_passer_goalkeeper, any_deflection_in_chain, short_possession)
+    - Example: {{"event_id": "abc123"}}
+
+get_last_touch(event_id):
+    - REQUIRES event_id
+    - Returns: the last pass/touch immediately before the event (player, team, minute)
+    - Example: {{"event_id": "abc123"}}
+
+get_possession_summary(possession_id):
+    - REQUIRES possession_id
+    - Returns: compact possession metrics (event_count, pass_count, start_minute, end_minute)
+    - Example: {{"possession_id": 42}}
+
+get_event_context(event_id):
+    - REQUIRES event_id
+    - Example: {{"event_id": "abc123"}}
 
 == DECISION LOGIC ==
 1. Check history: Have you called find_goals yet?
@@ -92,8 +110,18 @@ get_event_summary(event_id):
    - YES → Check if question needs buildup context
 
 2. Does question need CAUSALITY/BUILDUP context (how/why/explain)?
-   - YES → Call get_event_context() or get_event_summary() with event_id
-   - NO → Output answer
+        - YES → MANDATORY: You MUST call `get_event_summary(event_id)` or `get_highlights(event_id)` FIRST (after identifying the event via `find_goals()` if needed).
+            * Do NOT call `get_event_context(event_id)` as your first causal action.
+            * Only call `get_event_context(event_id)` after a helper call if the helper's output (highlights or summary) indicates that deeper verification is required.
+        - NO → Output answer
+
+MANDATORY WORKFLOW (CAUSALITY):
+1) Determine target event(s) using `find_goals()` if an `event_id` is not already provided.
+2) ALWAYS call `get_event_summary(event_id)` or `get_highlights(event_id)` FIRST to obtain a concise buildup and any high-signal anomalies.
+3) Based on summary/highlights, determine if you have enough context to answer.
+4) ONLY call `get_event_context(event_id)` if the helper's output indicates missing or ambiguous details (reflection returns `incomplete`).
+
+This helper-first workflow is mandatory for every causality/"how did" or "why" question. Do not call full-chain retrieval as the first step for causality.
 
 == REQUIRED OUTPUT FORMAT - JSON ONLY ==
 Output ONLY valid JSON, nothing else. Three fields required:
@@ -230,8 +258,8 @@ Completeness: Data contains 'buildup_chain' or 'buildup_passes' fields? → COMP
 1. Read the question carefully
 2. Ask yourself: "Is the user asking WHAT/WHICH (enumeration) or HOW/WHY (causality)?"
 3. Check DATA FIELDS IN RESULTS:
-   - If you see 'buildup_chain' or 'buildup_passes' in the data → causality question is COMPLETE
-   - If data has only goal_id, minute, scorer (no buildup fields) → causality question is INCOMPLETE
+    - If you see 'highlights' with one or more items OR 'buildup_chain'/'buildup_passes' in the data → causality question may be COMPLETE
+    - If data has only goal_id, minute, scorer (no highlights or buildup fields) → causality question is INCOMPLETE
 4. Output JSON decision
 
 == CRITICAL PRINCIPLE ==

@@ -391,6 +391,20 @@ def get_event_summary(
         chain_parts = [f"{p['from']} → {p['to']}" for p in key_passes]
         chain_narrative = " → ".join(chain_parts) if chain_parts else "No complete passes"
         
+        # Use highlights helper to surface compact, high-signal facts
+        try:
+            hl = get_highlights(db, event_id)
+            highlights_data = hl.data if hl.success else {}
+        except Exception:
+            highlights_data = {}
+
+        highlights_list = highlights_data.get("highlights") if isinstance(highlights_data, dict) else None
+        highlights_features = highlights_data.get("features") if isinstance(highlights_data, dict) else None
+        highlights_summary = None
+        if highlights_list:
+            hs = [f"{h.get('type')}: {h.get('detail')}" for h in highlights_list if isinstance(h, dict)]
+            highlights_summary = "; ".join(hs) if hs else None
+
         return ToolResult(
             success=True,
             data={
@@ -398,6 +412,9 @@ def get_event_summary(
                 "key_sequence": chain_narrative,
                 "key_passes": key_passes,
                 "pass_count": len(key_passes),
+                "highlights": highlights_list or [],
+                "highlights_features": highlights_features or {},
+                "highlights_summary": highlights_summary,
             },
             raw_query=query
         )
@@ -777,37 +794,239 @@ ORDER BY t.name ASC, p.name ASC"""
         return ToolResult(success=False, error=str(e), raw_query=query)
 
 
-def list_available_tools() -> list[dict]:
-    """Dynamically extract tool metadata from function docstrings.
-    
-    Works like MCP: reads the docstring from each tool function to provide
-    comprehensive documentation to the agent without maintaining a separate list.
-    
-    Returns a list of dicts with:
-    - name: Function name
-    - docstring: Full docstring (explains usage, parameters, examples)
+
+def get_last_touch(db: Neo4jClient, event_id: str, **kwargs) -> ToolResult:
+    """Return the last pass/touch event immediately before the given event_id.
+
+    Useful to quickly check who had the final touch leading into the event
+    and whether it was by the same team or the opponent.
+
+    Returns: {"event_id": ..., "player": ..., "team": ..., "minute": ..., "second": ..., "position": ...}
     """
-    # Get all functions in this module that are tools (not starting with _)
-    tools_module = inspect.getmodule(list_available_tools)
-    tool_functions = [
-        name for name in dir(tools_module)
-        if not name.startswith('_')
-        and callable(getattr(tools_module, name))
-        and name not in ['list_available_tools', 'ToolResult', 'PossessionChain', 'PassData', 'FormationSnapshot', 'Optional', 'Any', 'inspect', 'Neo4jClient']
-    ]
-    
-    tools_list = []
-    for tool_name in tool_functions:
-        func = getattr(tools_module, tool_name)
-        sig = inspect.signature(func)
-        
-        # Extract parameter names (skip db_client parameter)
-        params = [p for p in sig.parameters.keys() if p != 'db']
-        
-        tools_list.append({
-            "name": tool_name,
-            "docstring": inspect.getdoc(func) or "No documentation available",
-            "parameters": params,
-        })
-    
-    return sorted(tools_list, key=lambda x: x["name"])
+    query = """
+    MATCH (target:Event {id: $event_id})
+    MATCH (pos:Possession)-[:CONTAINS]->(target)
+    MATCH (pos)-[:CONTAINS]->(e:Event)
+    WHERE e.type = 'Pass' AND (
+      e.minute < target.minute OR (e.minute = target.minute AND e.second < target.second)
+    )
+    RETURN e.id as event_id, e.player_name as player, e.team_name as team, e.minute as minute, e.second as second, e.position_name as position
+    ORDER BY e.minute DESC, e.second DESC
+    LIMIT 1
+    """
+    try:
+        results = db.query(query, {"event_id": event_id})
+        if not results:
+            return ToolResult(success=True, data={})
+        r = results[0]
+        return ToolResult(success=True, data={
+            "event_id": r.get("event_id"),
+            "player": r.get("player"),
+            "team": r.get("team"),
+            "minute": r.get("minute"),
+            "second": r.get("second"),
+            "position": r.get("position"),
+        }, raw_query=query)
+    except Exception as e:
+        return ToolResult(success=False, error=str(e), raw_query=query)
+
+
+def get_possession_summary(db: Neo4jClient, pos_id: int, **kwargs) -> ToolResult:
+    """Return compact summary stats for a possession: event count, pass count, start/end minute, team_id."""
+    query = """
+    MATCH (pos:Possession {id: $pos_id})
+    OPTIONAL MATCH (pos)-[:CONTAINS]->(e:Event)
+    RETURN pos.team_id as team_id, pos.event_count as event_count, pos.start_minute as start_minute, pos.end_minute as end_minute,
+           SUM(CASE WHEN e.type = 'Pass' THEN 1 ELSE 0 END) as pass_count
+    """
+    try:
+        results = db.query(query, {"pos_id": pos_id})
+        if not results:
+            return ToolResult(success=False, error="Possession not found", raw_query=query)
+        r = results[0]
+        return ToolResult(
+            success=True,
+            data={
+                "team_id": r.get("team_id"),
+                "event_count": r.get("event_count"),
+                "start_minute": r.get("start_minute"),
+                "end_minute": r.get("end_minute"),
+                "pass_count": r.get("pass_count"),
+            },
+            raw_query=query,
+        )
+    except Exception as e:
+        return ToolResult(success=False, error=str(e), raw_query=query)
+
+
+def get_highlights(db: Neo4jClient, event_id: str, window: int = 6, **kwargs) -> ToolResult:
+    """Return high-signal highlights and compact features for an event.
+
+    Detects anomalies and notable facts in the possession leading to `event_id` such as:
+    - cross-team last touch
+    - last passer is goalkeeper or defender
+    - deflections in chain
+    - own-goal markers
+    - set-piece + rebound
+    - high-xG vs low buildup mismatches
+    - long-ball chains
+    - quick counter possessions
+
+    Returns: {"highlights": [...], "features": {...}}
+    """
+    try:
+        # Get target event basic fields and possession id
+        target_q = """
+        MATCH (t:Event {id: $event_id})
+        RETURN t.team_id as team_id, t.team_name as team_name, t.possession_id as pos_id,
+               t.shot_xg as shot_xg, t.shot_deflected as shot_deflected, t.shot_outcome as shot_outcome, t.play_pattern as play_pattern, t.minute as minute, t.second as second
+        """
+        tgt = db.query(target_q, {"event_id": event_id})
+        if not tgt:
+            return ToolResult(success=False, error="Event not found", raw_query=target_q)
+        team_id = tgt[0].get("team_id")
+        team_name = tgt[0].get("team_name")
+        pos_id = tgt[0].get("pos_id")
+        shot_xg = tgt[0].get("shot_xg")
+        shot_deflected = tgt[0].get("shot_deflected")
+        shot_outcome = tgt[0].get("shot_outcome")
+        play_pattern = tgt[0].get("play_pattern")
+        target_minute = tgt[0].get("minute")
+        target_second = tgt[0].get("second")
+
+        highlights = []
+
+        # 1) Last touch (cross-team or goalkeeper/defender passer)
+        last = get_last_touch(db, event_id)
+        last_data = last.data if last.success else {}
+        if last_data:
+            last_team = last_data.get("team")
+            last_player = last_data.get("player")
+            last_position = last_data.get("position") or ""
+            if last_team and team_name and last_team != team_name:
+                highlights.append({
+                    "type": "cross_team_last_touch",
+                    "detail": "Last touch before event by opponent",
+                    "event_id": last_data.get("event_id"),
+                    "player": last_player,
+                    "team": last_team,
+                    "minute": last_data.get("minute"),
+                })
+            # Goalkeeper/defender as last passer
+            if last_position and last_position.lower().startswith("goalkeeper"):
+                highlights.append({"type": "last_passer_goalkeeper", "detail": "Last passer was a goalkeeper", "player": last_player})
+            elif last_position and "defender" in last_position.lower():
+                highlights.append({"type": "last_passer_defender", "detail": "Last passer was a defender", "player": last_player})
+
+        # 2) Any deflections in possession (pass_deflected or shot_deflected)
+        def_q = "MATCH (pos:Possession {id: $pos_id})-[:CONTAINS]->(e:Event) WHERE e.type='Pass' AND e.pass_deflected = true RETURN count(e) as deflections"
+        def_r = db.query(def_q, {"pos_id": pos_id}) if pos_id is not None else []
+        def_count = def_r[0].get("deflections") if def_r else 0
+        if def_count and def_count > 0:
+            highlights.append({"type": "any_deflection_in_chain", "detail": f"{def_count} deflected pass(es) in buildup"})
+        if shot_deflected:
+            highlights.append({"type": "shot_deflected", "detail": "Shot was recorded as deflected"})
+
+        # 3) Own goal / opponent error
+        if shot_outcome and isinstance(shot_outcome, str) and "own" in shot_outcome.lower():
+            highlights.append({"type": "own_goal", "detail": "Shot outcome recorded as own goal"})
+
+        # 4) Set-piece rebound detection: if play_pattern indicates set piece or a prior shot exists in the possession
+        if play_pattern and "set" in str(play_pattern).lower():
+            highlights.append({"type": "set_piece", "detail": f"Play pattern: {play_pattern}"})
+            # check for previous shot in possession
+            prior_shot_q = "MATCH (pos:Possession {id: $pos_id})-[:CONTAINS]->(e:Event) WHERE e.type='Shot' AND (e.minute < $minute OR (e.minute = $minute AND e.second < $second)) RETURN count(e) as prior_shots"
+            prior_r = db.query(prior_shot_q, {"pos_id": pos_id, "minute": target_minute, "second": target_second}) if pos_id is not None else []
+            prior_count = prior_r[0].get("prior_shots") if prior_r else 0
+            if prior_count and prior_count > 0:
+                highlights.append({"type": "set_piece_rebound", "detail": f"Prior shot in possession: {prior_count}"})
+
+        # 5) High-xG vs low-buildup mismatch
+        pos_sum = get_possession_summary(db, pos_id) if pos_id is not None else ToolResult(success=False, data=None)
+        pos_data = pos_sum.data if pos_sum.success else {}
+        event_count = pos_data.get("event_count") if pos_data else None
+        pass_count = pos_data.get("pass_count") if pos_data else None
+        try:
+            if shot_xg is not None:
+                # High xG but low pass count → unexpected high-quality chance from limited buildup
+                if shot_xg >= 0.4 and (pass_count is None or pass_count <= 2):
+                    highlights.append({"type": "high_xg_from_short_buildup", "detail": f"High xG ({shot_xg}) despite short buildup (passes={pass_count})"})
+                # Low xG despite long buildup
+                if shot_xg <= 0.05 and (pass_count and pass_count >= 8):
+                    highlights.append({"type": "low_xg_after_long_buildup", "detail": f"Low xG ({shot_xg}) after long buildup (passes={pass_count})"})
+        except Exception:
+            pass
+
+        # 6) Long-ball / launch chain detection: any long pass in possession
+        long_pass_q = "MATCH (pos:Possession {id: $pos_id})-[:CONTAINS]->(e:Event) WHERE e.type='Pass' AND e.pass_length >= $threshold RETURN count(e) as long_passes"
+        long_r = db.query(long_pass_q, {"pos_id": pos_id, "threshold": 30}) if pos_id is not None else []
+        long_count = long_r[0].get("long_passes") if long_r else 0
+        if long_count and long_count > 0:
+            highlights.append({"type": "long_ball_chain", "detail": f"{long_count} long pass(es) (>=30m) in buildup"})
+
+        # 7) Quick counter detection: small event_count or short time window
+        try:
+            if pos_data and event_count is not None:
+                # Approximate duration in minutes
+                start_min = pos_data.get("start_minute")
+                end_min = pos_data.get("end_minute")
+                duration = None
+                if start_min is not None and end_min is not None:
+                    duration = end_min - start_min
+                if (event_count and event_count <= 4) or (duration is not None and duration <= 1):
+                    highlights.append({"type": "quick_counter", "detail": f"Quick possession (events={event_count}, duration_min={duration})"})
+        except Exception:
+            pass
+
+        features = {
+            "possession_event_count": event_count,
+            "possession_pass_count": pass_count,
+            "shot_xg": shot_xg,
+        }
+
+        return ToolResult(success=True, data={"highlights": highlights, "features": features}, raw_query="get_highlights")
+    except Exception as e:
+        return ToolResult(success=False, error=str(e))
+
+
+def get_available_tools(**kwargs) -> ToolResult:
+    """Return a list of available tool functions in this module.
+
+    The result is a list of objects: {name, description, parameters} which
+    is suitable for registering with an agent or for programmatic discovery.
+    """
+    try:
+        tools_list = []
+        for name, obj in globals().items():
+            if inspect.isfunction(obj) and obj.__module__ == __name__:
+                # skip private helpers
+                if name.startswith("_"):
+                    continue
+                # skip this discovery function
+                if name == "get_available_tools":
+                    continue
+                sig = inspect.signature(obj)
+                params = [p for p in sig.parameters.keys() if p != 'db']
+                doc = inspect.getdoc(obj) or ""
+                first_line = doc.splitlines()[0] if doc else ""
+                tools_list.append({
+                    "name": name,
+                    "docstring": doc,
+                    "description": first_line,
+                    "parameters": params,
+                })
+        tools_list = sorted(tools_list, key=lambda x: x["name"])
+        return ToolResult(success=True, data=tools_list, raw_query="get_available_tools")
+    except Exception as e:
+        return ToolResult(success=False, error=str(e))
+
+def list_available_tools() -> list:
+    """Return a plain list of available tools for programmatic use.
+
+    Each item is a dict with keys: name, docstring, description, parameters.
+    This is used by the agent to build prompts and validate actions.
+    """
+    tr = get_available_tools()
+    if not tr.success:
+        return []
+    return tr.data or []
