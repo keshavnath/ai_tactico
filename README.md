@@ -238,7 +238,7 @@ This iterative process continues until the agent has sufficient information or d
 ```
 ai_tactico/
 ├── src/
-│   ├── agent/                    # ★ AGENT SYSTEM (Core)
+│   ├── agent/                    # AGENT SYSTEM (Core)
 │   │   ├── agent.py              # LangGraph ReAct orchestrator (4-node graph)
 │   │   ├── prompts.py            # System, ReAct, Reflection prompts (AI engineering)
 │   │   ├── tools.py              # 9 tactical tools (docstring-based discovery)
@@ -268,65 +268,6 @@ ai_tactico/
 ├── docker-compose.yml            # Neo4j infrastructure
 └── pyproject.toml                # Dependencies (LangGraph, Neo4j, Flask, etc.)
 ```
-
-### Architecture Highlights
-
-**Agent System** (`src/agent/`):
-- `agent.py`: LangGraph graph with conditional edges (think→act→reflect→answer)
-  - Nodes: `_think_node` (LLM reasoning), `_act_node` (tool execution), `_reflect_node` (analysis), `_answer_node` (response)
-  - Conditional edges: Act→Reflect (validate tool parsing), Reflect→Think or Answer (continue or finalize)
-  - Early stopping: When "Final Answer:" detected, loop terminates
-  - State management: `AgentState` (holds question, thoughts, actions, reflections, answer)
-- `prompts.py`: AI engineering core
-  - System prompt: Tells agent what it is, lists all 9 tools with signatures
-  - ReAct prompt: Teaches reasoning before action, emphasizes docstrings
-  - Reflection prompt: Decision tree (Is data complete? Is it tactical? Continue or finalize?)
-- `tools.py`: 9 specialized Neo4j queries
-  - find_goals, get_possession_stats, get_attacking_patterns, analyze_transitions
-  - get_pass_network, analyze_defensive_organization, get_pressing_intensity
-  - get_possession_before_event, get_team_formation
-  - Docstring extraction (MCP pattern): Agent reads tool docstrings to discover capabilities
-  - Response limits: LIMIT 10, 6, etc. for SLM efficiency
-
-**Knowledge Graph** (`src/db/`):
-- Event-centric schema: Pass, Shot, Pressure, Duel, etc.
-- Possession chains linked temporally
-- Player-team-formation relationships
-- Constraints enforce data integrity
-
-**Entry Points**:
-- `main.py`: Flask web server (primary interface for agent interaction)
-- `agent.py`: Interactive CLI (for development & debugging agent reasoning)
-
-## AI Engineering Insights
-
-**Agentic Reasoning Design**:
-- Iterative think→act→reflect loop prevents hallucinations
-- Conditional edges in LangGraph enable early stopping (no wasted iterations)
-- Max iteration limit (10) prevents infinite loops while allowing complex reasoning
-
-**Prompt Engineering for LLMs**:
-- System prompt explicitly lists all tools (agent can't "invent" tools)
-- ReAct prompt teaches structured reasoning before action
-- Reflection prompt uses decision tree logic (Is data complete? Is answer ready?)
-- All prompts optimized for 1.7B parameter model (concise, unambiguous, minimal fluff)
-
-**Tool Design for Knowledge Graphs**:
-- 9 specialized tools (not generic graph traversal): Each designed for specific tactical question
-- Complete data guarantees: Tools return ALL relevant results (no arbitrary LIMIT 1 that causes incomplete answers)
-- Response limits prevent context overflow: LIMIT 10 partnerships (top 10), LIMIT 6 defenders (top 6), etc.
-- Docstring-based discovery (MCP pattern): Agent reads docstrings to understand tool capabilities
-
-**Knowledge Graph Architecture**:
-- Event-centric design (not generic graph): Every node type (Pass, Shot, Formation, Pressure) has semantic meaning for football
-- Temporal linking preserves possession chains and transition sequences
-- Constraint-based schema enforces data integrity (unique players, valid formations, etc.)
-
-**SLM Optimization** (Small Language Models like 1.7B params):
-- Tool results limited to prevent context overflow
-- Prompts use direct, unambiguous language (not abstract metaphors)
-- Few-shot examples in prompts teach by demonstration, not explanation
-- Agent stops immediately on "Final Answer:" (no resummarization overhead)
 
 ## Performance Notes
 
